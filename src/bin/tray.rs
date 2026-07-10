@@ -73,9 +73,9 @@ fn main() {
                         let status_text = match new_state {
                             State::Disconnected => "Status: Disconnected".to_string(),
                             State::Searching => "Status: Searching...".to_string(),
-                            State::Connected { device_address } => {
-                                format!("Status: Connected ({})", device_address)
-                            }
+                            State::Connecting { device_address } => format!("Status: Connecting to {}...", device_address),
+                            State::Connected { device_address } => format!("Status: Connected ({})", device_address),
+                            State::Reconnecting { device_address } => format!("Status: Reconnecting to {}...", device_address),
                         };
                         status_item.set_text(status_text);
                         search_item.set_enabled(matches!(new_state, State::Disconnected));

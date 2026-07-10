@@ -15,7 +15,9 @@ pub const SHIFT_DOWN_PATTERN: &[u8] = &[0xf3, 0x05, 0x03, 0x00, 0xfb];
 pub enum State {
     Disconnected,
     Searching,
+    Connecting { device_address: String },
     Connected { device_address: String },
+    Reconnecting { device_address: String },
 }
 
 #[derive(Debug, Clone)]

@@ -52,9 +52,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match state {
                     State::Disconnected => println!("📡 Status: Disconnected"),
                     State::Searching => println!("🔍 Scanning for device..."),
+                    State::Connecting { device_address } => println!("⏳ Connecting to {}...", device_address),
                     State::Connected { device_address } => {
                         println!("✅ Connected to device: {}", device_address);
                     }
+                    State::Reconnecting { device_address } => println!("🔄 Reconnecting to {}...", device_address),
                 }
             }
             BleEvent::Log(msg) => {
