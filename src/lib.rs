@@ -212,7 +212,7 @@ pub async fn run_ble_worker(
 
 async fn handle_peripheral(
     peripheral: PlatformPeripheral,
-    tx_event: mpsc::UnboundedSender<BleEvent>,
+    tx_event: &mpsc::UnboundedSender<BleEvent>,
     config: &BleConfig,
     notify_uuid: Uuid,
     battery_uuid: Uuid,
