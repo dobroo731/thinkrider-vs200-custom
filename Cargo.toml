@@ -1,0 +1,13 @@
+[package]
+name = "thinkrider-vs200-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+btleplug = "0.12.0"
+enigo = "0.6.1"
+futures = "0.3.32"
+tokio = { version = "1.52.3", features = ["full"] }
+tray-icon = "0.14"
+winit = "0.29"
+notify-rust = "4.11"
