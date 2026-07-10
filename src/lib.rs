@@ -200,7 +200,12 @@ async fn handle_peripheral(
     rx_notifications_enabled: watch::Receiver<bool>,
     config: &BleConfig,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut enigo = Enigo::new(&Settings::default()).unwrap();
+    let mut enigo = Enigo::new(&Settings::default())
+        .map_err(|e| format!("Failed to initialize keyboard emulator (Enigo): {}", e))?;
+
+    // Safety release: ensure no keys are stuck from previous sessions
+    let _ = enigo.key(config.up_key, Direction::Release);
+    let _ = enigo.key(config.down_key, Direction::Release);
 
     peripheral.connect().await?;
     peripheral.discover_services().await?;
