@@ -70,6 +70,7 @@ pub async fn run_ble_worker(
 
     let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<InternalEvent>();
     let mut scan_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut connection_task: Option<tokio::task::JoinHandle<()>> = None;
 
     loop {
         tokio::select! {
@@ -77,6 +78,9 @@ pub async fn run_ble_worker(
                 match cmd {
                     BleCommand::SearchDevice => {
                         if let Some(task) = scan_task.take() {
+                            task.abort();
+                        }
+                        if let Some(task) = connection_task.take() {
                             task.abort();
                         }
 
@@ -119,6 +123,9 @@ pub async fn run_ble_worker(
                         if let Some(task) = scan_task.take() {
                             task.abort();
                         }
+                        if let Some(task) = connection_task.take() {
+                            task.abort();
+                        }
                         let _ = tx_event.send(BleEvent::StatusUpdate(State::Disconnected));
                         let _ = tx_event.send(BleEvent::Log("Search stopped by user".to_string()));
                     }
@@ -132,20 +139,48 @@ pub async fn run_ble_worker(
 
                         let rx_notifications_enabled_clone = rx_notifications_enabled.clone();
                         let tx_event_clone = tx_event.clone();
-                        let config_clone = BleConfig { 
-                            up_key: config.up_key, 
-                            down_key: config.down_key, 
+                        let config_clone = BleConfig {
+                            up_key: config.up_key,
+                            down_key: config.down_key,
                             debug: config.debug,
                             notifications_enabled: config.notifications_enabled
                         };
 
-                        tokio::spawn(async move {
-                            if let Err(e) = handle_peripheral(peripheral, tx_event_clone.clone(), rx_notifications_enabled_clone, &config_clone).await
-                                && config_clone.debug {
-                                let _ = tx_event_clone.send(BleEvent::Log(format!("Peripheral error: {}", e)));
+                        connection_task = Some(tokio::spawn(async move {
+                            let mut retry_count = 0;
+                            let max_retries = 5;
+                            let mut backoff = std::time::Duration::from_secs(1);
+
+                            loop {
+                                if retry_count > 0 {
+                                    let _ = tx_event_clone.send(BleEvent::StatusUpdate(State::Reconnecting {
+                                        device_address: peripheral.address().to_string()
+                                    }));
+                                } else {
+                                    let _ = tx_event_clone.send(BleEvent::StatusUpdate(State::Connected {
+                                        device_address: peripheral.address().to_string()
+                                    }));
+                                }
+
+                                match handle_peripheral(peripheral.clone(), tx_event_clone.clone(), rx_notifications_enabled_clone.clone(), &config_clone).await {
+                                    Ok(_) => {
+                                        let _ = tx_event_clone.send(BleEvent::Log("Peripheral session ended gracefully".to_string()));
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        let _ = tx_event_clone.send(BleEvent::Log(format!("Connection lost: {}. Retrying... ({} / {})", e, retry_count + 1, max_retries)));
+                                        retry_count += 1;
+                                        if retry_count > max_retries {
+                                            let _ = tx_event_clone.send(BleEvent::Log("Max reconnection attempts reached. Giving up.".to_string()));
+                                            break;
+                                        }
+                                        tokio::time::sleep(backoff).await;
+                                        backoff *= 2;
+                                    }
+                                }
                             }
                             let _ = tx_event_clone.send(BleEvent::StatusUpdate(State::Disconnected));
-                        });
+                        }));
                     }
                     InternalEvent::StatusUpdate(s) => {
                         let _ = tx_event.send(BleEvent::StatusUpdate(s));
