@@ -231,24 +231,32 @@ async fn handle_peripheral(
 
     loop {
         tokio::select! {
-            Some(notification) = notifications.next() => {
-                if notification.uuid.to_string() == BATTERY_UUID_STR {
-                    if let Some(&level) = notification.value.first() {
-                        let _ = tx_event.send(BleEvent::BatteryLevel(level));
+            maybe_notification = notifications.next() => {
+                match maybe_notification {
+                    Some(notification) => {
+                        if notification.uuid.to_string() == BATTERY_UUID_STR {
+                            if let Some(&level) = notification.value.first() {
+                                let _ = tx_event.send(BleEvent::BatteryLevel(level));
+                            }
+                            continue;
+                        }
+
+                        if !*rx_notifications_enabled.borrow() { continue; }
+
+                        if notification.value == SHIFT_UP_PATTERN {
+                            if config.debug { let _ = tx_event.send(BleEvent::Log("Pressed: Up".to_string())); }
+                            let _ = enigo.key(config.up_key, Direction::Press);
+                            let _ = enigo.key(config.up_key, Direction::Release);
+                        } else if notification.value == SHIFT_DOWN_PATTERN {
+                            if config.debug { let _ = tx_event.send(BleEvent::Log("Pressed: Down".to_string())); }
+                            let _ = enigo.key(config.down_key, Direction::Press);
+                            let _ = enigo.key(config.down_key, Direction::Release);
+                        }
                     }
-                    continue;
-                }
-
-                if !*rx_notifications_enabled.borrow() { continue; }
-
-                if notification.value == SHIFT_UP_PATTERN {
-                    if config.debug { let _ = tx_event.send(BleEvent::Log("Pressed: Up".to_string())); }
-                    let _ = enigo.key(config.up_key, Direction::Press);
-                    let _ = enigo.key(config.up_key, Direction::Release);
-                } else if notification.value == SHIFT_DOWN_PATTERN {
-                    if config.debug { let _ = tx_event.send(BleEvent::Log("Pressed: Down".to_string())); }
-                    let _ = enigo.key(config.down_key, Direction::Press);
-                    let _ = enigo.key(config.down_key, Direction::Release);
+                    None => {
+                        let _ = tx_event.send(BleEvent::Log("BLE notification stream closed".to_string()));
+                        return Err("Notification stream terminated".into());
+                    }
                 }
             }
             _ = battery_poll_interval.tick() => {
