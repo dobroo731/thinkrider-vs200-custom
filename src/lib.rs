@@ -25,6 +25,7 @@ pub enum BleEvent {
     StatusUpdate(State),
     Log(String),
     BatteryLevel(u8),
+    KeyPress(String),
 }
 
 #[derive(Debug, Clone)]
@@ -137,7 +138,6 @@ pub async fn run_ble_worker(
                         let addr = peripheral.address().to_string();
                         let _ = tx_event.send(BleEvent::StatusUpdate(State::Connected { device_address: addr }));
 
-                        let rx_notifications_enabled_clone = rx_notifications_enabled.clone();
                         let tx_event_clone = tx_event.clone();
                         let config_clone = BleConfig {
                             up_key: config.up_key,
@@ -162,7 +162,7 @@ pub async fn run_ble_worker(
                                     }));
                                 }
 
-                                match handle_peripheral(peripheral.clone(), tx_event_clone.clone(), rx_notifications_enabled_clone.clone(), &config_clone).await {
+                                match handle_peripheral(peripheral.clone(), tx_event_clone.clone(), &config_clone).await {
                                     Ok(_) => {
                                         let _ = tx_event_clone.send(BleEvent::Log("Peripheral session ended gracefully".to_string()));
                                         break;
@@ -197,7 +197,6 @@ pub async fn run_ble_worker(
 async fn handle_peripheral(
     peripheral: PlatformPeripheral,
     tx_event: mpsc::UnboundedSender<BleEvent>,
-    rx_notifications_enabled: watch::Receiver<bool>,
     config: &BleConfig,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut enigo = Enigo::new(&Settings::default())
@@ -241,14 +240,14 @@ async fn handle_peripheral(
                             continue;
                         }
 
-                        if !*rx_notifications_enabled.borrow() { continue; }
-
                         if notification.value == SHIFT_UP_PATTERN {
                             if config.debug { let _ = tx_event.send(BleEvent::Log("Pressed: Up".to_string())); }
+                            let _ = tx_event.send(BleEvent::KeyPress("Up".to_string()));
                             let _ = enigo.key(config.up_key, Direction::Press);
                             let _ = enigo.key(config.up_key, Direction::Release);
                         } else if notification.value == SHIFT_DOWN_PATTERN {
                             if config.debug { let _ = tx_event.send(BleEvent::Log("Pressed: Down".to_string())); }
+                            let _ = tx_event.send(BleEvent::KeyPress("Down".to_string()));
                             let _ = enigo.key(config.down_key, Direction::Press);
                             let _ = enigo.key(config.down_key, Direction::Release);
                         }

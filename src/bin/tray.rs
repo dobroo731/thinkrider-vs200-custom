@@ -84,18 +84,37 @@ fn main() {
                         if !matches!(new_state, State::Connected { .. }) {
                             battery_item.set_text("Battery: --%");
                         }
+
+                        if app_state.notifications_enabled {
+                            match new_state {
+                                State::Connected { device_address } => {
+                                    let _ = notify_rust::Notification::new()
+                                        .summary("Think Rider")
+                                        .body(&format!("Connected to {}", device_address))
+                                        .show();
+                                }
+                                State::Disconnected => {
+                                    let _ = notify_rust::Notification::new()
+                                        .summary("Think Rider")
+                                        .body("Disconnected")
+                                        .show();
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                     BleEvent::BatteryLevel(level) => {
                         battery_item.set_text(format!("Battery: {}%", level));
                     }
-                    BleEvent::Log(msg) => {
+                    BleEvent::KeyPress(key) => {
                         if app_state.notifications_enabled {
                             let _ = notify_rust::Notification::new()
                                 .summary("Think Rider")
-                                .body(&msg)
+                                .body(&format!("Key Pressed: {}", key))
                                 .show();
                         }
                     }
+                    BleEvent::Log(_msg) => {}
                 }
             }
 

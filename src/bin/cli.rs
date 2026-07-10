@@ -70,6 +70,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("⚠️ Low battery warning!");
                 }
             }
+            BleEvent::KeyPress(key) => {
+                println!("⌨️ Key Pressed: {}", key);
+            }
         }
     }
 
