@@ -1,4 +1,6 @@
 use btleplug::api::{Central, Manager, Peripheral, ScanFilter};
+use uuid::Uuid;
+use std::sync::OnceLock;
 use btleplug::platform::{Manager as PlatformManager, Peripheral as PlatformPeripheral};
 use enigo::{Enigo, Keyboard, Key, Settings, Direction};
 use tokio::sync::{mpsc, watch};
@@ -11,6 +13,17 @@ pub const NOTIFY_UUID_STR: &str = "0000fea1-0000-1000-8000-00805f9b34fb";
 pub const BATTERY_UUID_STR: &str = "00002a19-0000-1000-8000-00805f9b34fb";
 pub const SHIFT_UP_PATTERN: &[u8] = &[0xf3, 0x05, 0x03, 0x01, 0xfc];
 pub const SHIFT_DOWN_PATTERN: &[u8] = &[0xf3, 0x05, 0x03, 0x00, 0xfb];
+
+static NOTIFY_UUID: OnceLock<Uuid> = OnceLock::new();
+static BATTERY_UUID: OnceLock<Uuid> = OnceLock::new();
+
+fn get_notify_uuid() -> Uuid {
+    *NOTIFY_UUID.get_or_init(|| Uuid::parse_str(NOTIFY_UUID_STR).expect("Invalid NOTIFY_UUID_STR"))
+}
+
+fn get_battery_uuid() -> Uuid {
+    *BATTERY_UUID.get_or_init(|| Uuid::parse_str(BATTERY_UUID_STR).expect("Invalid BATTERY_UUID_STR"))
+}
 
 #[derive(Debug, Clone)]
 pub enum State {
@@ -159,7 +172,13 @@ pub async fn run_ble_worker(
                                     }));
                                 }
 
-                                match handle_peripheral(peripheral.clone(), tx_event_clone.clone(), &config_clone).await {
+                                match handle_peripheral(
+                                    peripheral.clone(), 
+                                    &tx_event_clone, 
+                                    &config_clone,
+                                    get_notify_uuid(),
+                                    get_battery_uuid()
+                                ).await {
                                     Ok(_) => {
                                         let _ = tx_event_clone.send(BleEvent::Log("Peripheral session ended gracefully".into()));
                                         break;
@@ -195,6 +214,8 @@ async fn handle_peripheral(
     peripheral: PlatformPeripheral,
     tx_event: mpsc::UnboundedSender<BleEvent>,
     config: &BleConfig,
+    notify_uuid: Uuid,
+    battery_uuid: Uuid,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut enigo = Enigo::new(&Settings::default())
         .map_err(|e| format!("Failed to initialize keyboard emulator (Enigo): {}", e))?;
@@ -209,12 +230,12 @@ async fn handle_peripheral(
     let chars = peripheral.characteristics();
 
     // 1. Setup Keystroke Notifications
-    let notify_char = chars.iter().find(|c| c.uuid.to_string() == NOTIFY_UUID_STR)
+    let notify_char = chars.iter().find(|c| c.uuid == notify_uuid)
         .ok_or("Could not find notification characteristic")?;
     peripheral.subscribe(notify_char).await?;
 
     // 2. Setup Battery Notifications
-    let battery_char = chars.iter().find(|c| c.uuid.to_string() == BATTERY_UUID_STR).cloned();
+    let battery_char = chars.iter().find(|c| c.uuid == battery_uuid).cloned();
     if let Some(bc) = &battery_char
         && peripheral.subscribe(bc).await.is_ok()
         && let Ok(val) = peripheral.read(bc).await
@@ -230,7 +251,7 @@ async fn handle_peripheral(
             maybe_notification = notifications.next() => {
                 match maybe_notification {
                     Some(notification) => {
-                        if notification.uuid.to_string() == BATTERY_UUID_STR {
+                        if notification.uuid == battery_uuid {
                             if let Some(&level) = notification.value.first() {
                                 let _ = tx_event.send(BleEvent::BatteryLevel(level));
                             }
