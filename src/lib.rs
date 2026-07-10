@@ -2,6 +2,7 @@ use btleplug::api::{Central, Manager, Peripheral, ScanFilter};
 use btleplug::platform::{Manager as PlatformManager, Peripheral as PlatformPeripheral};
 use enigo::{Enigo, Keyboard, Key, Settings, Direction};
 use tokio::sync::{mpsc, watch};
+use std::borrow::Cow;
 use std::error::Error;
 use futures::stream::StreamExt;
 
@@ -15,17 +16,17 @@ pub const SHIFT_DOWN_PATTERN: &[u8] = &[0xf3, 0x05, 0x03, 0x00, 0xfb];
 pub enum State {
     Disconnected,
     Searching,
-    Connecting { device_address: String },
-    Connected { device_address: String },
-    Reconnecting { device_address: String },
+    Connecting { device_address: Cow<'static, str> },
+    Connected { device_address: Cow<'static, str> },
+    Reconnecting { device_address: Cow<'static, str> },
 }
 
 #[derive(Debug, Clone)]
 pub enum BleEvent {
     StatusUpdate(State),
-    Log(String),
+    Log(Cow<'static, str>),
     BatteryLevel(u8),
-    KeyPress(String),
+    KeyPress(Cow<'static, str>),
 }
 
 #[derive(Debug, Clone)]
@@ -57,7 +58,7 @@ impl Default for BleConfig {
 enum InternalEvent {
     DeviceFound(PlatformPeripheral),
     StatusUpdate(State),
-    Log(String),
+    Log(Cow<'static, str>),
 }
 
 pub async fn run_ble_worker(
@@ -87,7 +88,7 @@ pub async fn run_ble_worker(
                         }
 
                         if *rx_notifications_enabled.borrow() {
-                            let _ = tx_event.send(BleEvent::Log("User triggered 'Search Device'".to_string()));
+                            let _ = tx_event.send(BleEvent::Log("User triggered 'Search Device'".into()));
                         }
 
                         let _ = tx_event.send(BleEvent::StatusUpdate(State::Searching));
@@ -97,7 +98,7 @@ pub async fn run_ble_worker(
 
                         scan_task = Some(tokio::spawn(async move {
                             if let Err(e) = adapter_clone.start_scan(ScanFilter::default()).await {
-                                let _ = internal_tx_clone.send(InternalEvent::Log(format!("Scan start error: {}", e)));
+                                let _ = internal_tx_clone.send(InternalEvent::Log(format!("Scan start error: {}", e).into()));
                                 return;
                             }
 
@@ -129,15 +130,15 @@ pub async fn run_ble_worker(
                             task.abort();
                         }
                         let _ = tx_event.send(BleEvent::StatusUpdate(State::Disconnected));
-                        let _ = tx_event.send(BleEvent::Log("Search stopped by user".to_string()));
+                        let _ = tx_event.send(BleEvent::Log("Search stopped by user".into()));
                     }
                 }
             }
             Some(internal_event) = internal_rx.recv() => {
                 match internal_event {
                     InternalEvent::DeviceFound(peripheral) => {
-                        let addr = peripheral.address().to_string();
-                        let _ = tx_event.send(BleEvent::StatusUpdate(State::Connected { device_address: addr }));
+                        let addr: Cow<'static, str> = peripheral.address().to_string().into();
+                        let _ = tx_event.send(BleEvent::StatusUpdate(State::Connected { device_address: addr.clone() }));
 
                         let tx_event_clone = tx_event.clone();
                         let config_clone = config.clone();
@@ -150,24 +151,24 @@ pub async fn run_ble_worker(
                             loop {
                                 if retry_count > 0 {
                                     let _ = tx_event_clone.send(BleEvent::StatusUpdate(State::Reconnecting {
-                                        device_address: peripheral.address().to_string()
+                                        device_address: addr.clone()
                                     }));
                                 } else {
                                     let _ = tx_event_clone.send(BleEvent::StatusUpdate(State::Connected {
-                                        device_address: peripheral.address().to_string()
+                                        device_address: addr.clone()
                                     }));
                                 }
 
                                 match handle_peripheral(peripheral.clone(), tx_event_clone.clone(), &config_clone).await {
                                     Ok(_) => {
-                                        let _ = tx_event_clone.send(BleEvent::Log("Peripheral session ended gracefully".to_string()));
+                                        let _ = tx_event_clone.send(BleEvent::Log("Peripheral session ended gracefully".into()));
                                         break;
                                     }
                                     Err(e) => {
-                                        let _ = tx_event_clone.send(BleEvent::Log(format!("Connection lost: {}. Retrying... ({} / {})", e, retry_count + 1, max_retries)));
+                                        let _ = tx_event_clone.send(BleEvent::Log(format!("Connection lost: {}. Retrying... ({} / {})", e, retry_count + 1, max_retries).into()));
                                         retry_count += 1;
                                         if retry_count > max_retries {
-                                            let _ = tx_event_clone.send(BleEvent::Log("Max reconnection attempts reached. Giving up.".to_string()));
+                                            let _ = tx_event_clone.send(BleEvent::Log("Max reconnection attempts reached. Giving up.".into()));
                                             break;
                                         }
                                         tokio::time::sleep(backoff).await;
@@ -237,19 +238,19 @@ async fn handle_peripheral(
                         }
 
                         if notification.value == SHIFT_UP_PATTERN {
-                            if config.debug { let _ = tx_event.send(BleEvent::Log("Pressed: Up".to_string())); }
-                            let _ = tx_event.send(BleEvent::KeyPress("Up".to_string()));
+                            if config.debug { let _ = tx_event.send(BleEvent::Log("Pressed: Up".into())); }
+                            let _ = tx_event.send(BleEvent::KeyPress("Up".into()));
                             let _ = enigo.key(config.up_key, Direction::Press);
                             let _ = enigo.key(config.up_key, Direction::Release);
                         } else if notification.value == SHIFT_DOWN_PATTERN {
-                            if config.debug { let _ = tx_event.send(BleEvent::Log("Pressed: Down".to_string())); }
-                            let _ = tx_event.send(BleEvent::KeyPress("Down".to_string()));
+                            if config.debug { let _ = tx_event.send(BleEvent::Log("Pressed: Down".into())); }
+                            let _ = tx_event.send(BleEvent::KeyPress("Down".into()));
                             let _ = enigo.key(config.down_key, Direction::Press);
                             let _ = enigo.key(config.down_key, Direction::Release);
                         }
                     }
                     None => {
-                        let _ = tx_event.send(BleEvent::Log("BLE notification stream closed".to_string()));
+                        let _ = tx_event.send(BleEvent::Log("BLE notification stream closed".into()));
                         return Err("Notification stream terminated".into());
                     }
                 }
