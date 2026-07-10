@@ -8,12 +8,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = BleConfig::default();
 
     for arg in &args {
-        if arg.to_lowercase() == "rouvy" {
-            // Note: Using K/I as placeholders since symbol variants
-            // vary across OS for enigo v0.6.
-            config.up_key = enigo::Key::K;
-            config.down_key = enigo::Key::I;
-        } else if arg.to_lowercase() == "debug" {
+        if arg.to_lowercase() == "debug" {
             config.debug = true;
         }
     }
