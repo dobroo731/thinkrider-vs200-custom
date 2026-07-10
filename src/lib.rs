@@ -34,6 +34,7 @@ pub enum BleCommand {
     StopSearch,
 }
 
+#[derive(Debug, Clone)]
 pub struct BleConfig {
     pub up_key: Key,
     pub down_key: Key,
@@ -139,12 +140,7 @@ pub async fn run_ble_worker(
                         let _ = tx_event.send(BleEvent::StatusUpdate(State::Connected { device_address: addr }));
 
                         let tx_event_clone = tx_event.clone();
-                        let config_clone = BleConfig {
-                            up_key: config.up_key,
-                            down_key: config.down_key,
-                            debug: config.debug,
-                            notifications_enabled: config.notifications_enabled
-                        };
+                        let config_clone = config.clone();
 
                         connection_task = Some(tokio::spawn(async move {
                             let mut retry_count = 0;
