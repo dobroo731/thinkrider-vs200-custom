@@ -1,4 +1,4 @@
-use thinkrider_vs200_rs::{BleCommand, BleConfig, BleEvent, State, run_ble_worker};
+use thinkrider_vs200_rs::{BleCommand, BleConfig, BleEvent, BleWorker, State};
 use tokio::sync::{broadcast, mpsc, watch};
 use tray_icon::menu::{MenuEvent, MenuId, MenuItem};
 use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
@@ -244,7 +244,15 @@ fn main() {
     // Spawn the BLE worker on the same runtime.
     let worker_config_rx = config_rx.clone();
     rt.spawn(async move {
-        if let Err(e) = run_ble_worker(worker_config_rx, event_tx, cmd_rx).await {
+        let worker = match BleWorker::new(worker_config_rx, event_tx, cmd_rx).await {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("❌ Failed to initialize BLE Worker: {}", e);
+                return;
+            }
+        };
+
+        if let Err(e) = worker.run().await {
             eprintln!("BLE worker error: {}", e);
         }
     });

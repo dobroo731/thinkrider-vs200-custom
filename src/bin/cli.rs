@@ -1,5 +1,5 @@
 use std::env;
-use thinkrider_vs200_rs::{BleCommand, BleConfig, BleEvent, run_ble_worker};
+use thinkrider_vs200_rs::{BleCommand, BleConfig, BleEvent, BleWorker};
 use tokio::sync::{broadcast, mpsc, watch};
 
 #[tokio::main]
@@ -24,7 +24,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let worker_config_rx = config_rx.clone();
     tokio::spawn(async move {
-        if let Err(e) = run_ble_worker(worker_config_rx, event_tx, cmd_rx).await {
+        let worker = match BleWorker::new(worker_config_rx, event_tx, cmd_rx).await {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("❌ Failed to initialize BLE Worker: {}", e);
+                return;
+            }
+        };
+
+        if let Err(e) = worker.run().await {
             eprintln!("❌ BLE Worker Error: {}", e);
         }
     });
