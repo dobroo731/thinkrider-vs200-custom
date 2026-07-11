@@ -1,139 +1,273 @@
-use thinkrider_vs200_rs::{BleConfig, BleCommand, BleEvent, State, run_ble_worker};
-use tray_icon::{TrayIconBuilder, TrayIconEvent, Icon};
-use tray_icon::menu::{MenuEvent, MenuId};
+use thinkrider_vs200_rs::{BleCommand, BleConfig, BleEvent, State, run_ble_worker};
+use tokio::sync::{broadcast, mpsc, watch};
+use tray_icon::menu::{MenuEvent, MenuId, MenuItem};
+use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
 use winit::{
-    event::Event as WinitEvent,
-    event_loop::{ControlFlow, EventLoop},
+    application::ApplicationHandler,
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
 };
-use tokio::sync::{mpsc, watch};
+
+enum UserEvent {
+    BleUpdate(BleEvent),
+    Tray(TrayIconEvent),
+    Menu(MenuEvent),
+    ConfigChanged(BleConfig),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display, strum::EnumString, strum::EnumIter)]
+pub enum MenuAction {
+    ToggleNotify,
+    Search,
+    StopSearch,
+    Status,
+    Battery,
+    Quit,
+}
+
+impl TryFrom<MenuId> for MenuAction {
+    type Error = strum::ParseError;
+    fn try_from(id: MenuId) -> Result<Self, Self::Error> {
+        use std::str::FromStr;
+        Self::from_str(id.as_ref())
+    }
+}
+
+struct MenuItems {
+    status: MenuItem,
+    search: MenuItem,
+    stop_search: MenuItem,
+    battery: MenuItem,
+    notify: MenuItem,
+}
+
+struct TrayApp {
+    cmd_tx: mpsc::UnboundedSender<BleCommand>,
+    config_tx: watch::Sender<BleConfig>,
+    items: MenuItems,
+}
+
+struct TrayMenu {
+    menu: tray_icon::menu::Menu,
+    items: MenuItems,
+}
+
+impl TrayApp {
+    fn send_notification(&self, body: &str) {
+        if self.config_tx.borrow().notifications_enabled {
+            let _ = notify_rust::Notification::new()
+                .summary("Think Rider")
+                .body(body)
+                .show();
+        }
+    }
+}
+
+impl ApplicationHandler<UserEvent> for TrayApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        event_loop.set_control_flow(ControlFlow::Wait);
+    }
+
+    fn window_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _id: winit::window::WindowId,
+        _event: winit::event::WindowEvent,
+    ) {
+        // No windows in this app
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::BleUpdate(worker_event) => match worker_event {
+                BleEvent::StatusUpdate(ref new_state) => {
+                    let status_text = match new_state {
+                        State::Disconnected => "Status: Disconnected".to_string(),
+                        State::Searching => "Status: Searching...".to_string(),
+                        State::Connecting { device_address } => {
+                            format!("Status: Connecting to {}...", device_address)
+                        }
+                        State::Connected { device_address } => {
+                            format!("Status: Connected ({})", device_address)
+                        }
+                        State::Reconnecting { device_address } => {
+                            format!("Status: Reconnecting to {}...", device_address)
+                        }
+                    };
+                    self.items.status.set_text(status_text);
+                    self.items
+                        .search
+                        .set_enabled(matches!(new_state, State::Disconnected));
+                    self.items
+                        .stop_search
+                        .set_enabled(matches!(new_state, State::Searching));
+                    self.items
+                        .battery
+                        .set_enabled(matches!(new_state, State::Connected { .. }));
+                    if !matches!(new_state, State::Connected { .. }) {
+                        self.items.battery.set_text("Battery: --%");
+                    }
+
+                    if let Some(msg) = match new_state {
+                        State::Connected { device_address } => {
+                            Some(format!("Connected to {}", device_address))
+                        }
+                        State::Disconnected => Some("Disconnected".to_string()),
+                        _ => None,
+                    } {
+                        self.send_notification(&msg);
+                    }
+                }
+                BleEvent::BatteryLevel(level) => {
+                    self.items.battery.set_text(format!("Battery: {}%", level));
+                }
+                BleEvent::KeyPress(key) => {
+                    self.send_notification(&format!("Key Pressed: {}", key));
+                }
+                BleEvent::Log(_msg) => {}
+            },
+            UserEvent::Tray(_tray_event) => {
+                // Handle tray icon events (e.g., clicks) if needed in the future
+            }
+            UserEvent::Menu(menu_event) => {
+                let id = menu_event.id().clone();
+                if let Ok(action) = MenuAction::try_from(id) {
+                    match action {
+                        MenuAction::ToggleNotify => {
+                            let mut current = self.config_tx.borrow().clone();
+                            current.notifications_enabled = !current.notifications_enabled;
+                            let _ = self.config_tx.send(current);
+                        }
+                        MenuAction::Search => {
+                            let _ = self.cmd_tx.send(BleCommand::SearchDevice);
+                        }
+                        MenuAction::StopSearch => {
+                            let _ = self.cmd_tx.send(BleCommand::StopSearch);
+                        }
+                        MenuAction::Quit => {
+                            std::process::exit(0);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            UserEvent::ConfigChanged(config) => {
+                self.items.notify.set_text(if config.notifications_enabled {
+                    "Notification [ON]"
+                } else {
+                    "Notification [OFF]"
+                });
+            }
+        }
+    }
+}
+
+impl TrayMenu {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let menu = tray_icon::menu::Menu::new();
+
+        let notify = MenuItem::with_id(MenuAction::ToggleNotify, "Notification [ON]", true, None);
+        let search = MenuItem::with_id(MenuAction::Search, "Search Device", true, None);
+        let stop_search = MenuItem::with_id(MenuAction::StopSearch, "Stop Searching", false, None);
+        let status = MenuItem::with_id(MenuAction::Status, "Status: Disconnected", false, None);
+        let battery = MenuItem::with_id(MenuAction::Battery, "Battery: --%", false, None);
+        let quit = MenuItem::with_id(MenuAction::Quit, "Quit", true, None);
+
+        menu.append(&notify)?;
+        menu.append(&search)?;
+        menu.append(&stop_search)?;
+        menu.append(&status)?;
+        menu.append(&battery)?;
+        menu.append(&quit)?;
+
+        Ok(Self {
+            menu,
+            items: MenuItems {
+                status,
+                search,
+                stop_search,
+                battery,
+                notify,
+            },
+        })
+    }
+}
 
 fn main() {
-    let event_loop = EventLoop::new().unwrap();
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build().unwrap();
+    let proxy = event_loop.create_proxy();
 
-    let mut app_state = BleConfig {
+    // Set up tray and menu handlers to forward events to the winit event loop
+    let proxy_tray = proxy.clone();
+    TrayIconEvent::set_event_handler(Some(move |event| {
+        let _ = proxy_tray.send_event(UserEvent::Tray(event));
+    }));
+
+    let proxy_menu = proxy.clone();
+    MenuEvent::set_event_handler(Some(move |event| {
+        let _ = proxy_menu.send_event(UserEvent::Menu(event));
+    }));
+
+    let app_state = BleConfig {
         notifications_enabled: true,
         ..Default::default()
     };
-
+    let (config_tx, config_rx) = watch::channel(app_state);
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-    let (notify_tx, notify_rx) = watch::channel(app_state.notifications_enabled);
+    let (event_tx, _event_rx) = broadcast::channel(16);
 
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        if let Err(e) = rt.block_on(run_ble_worker(BleConfig::default(), event_tx, cmd_rx, notify_rx)) {
+    // Initialize the Tokio runtime first.
+    // We do this manually instead of using #[tokio::main] so that the main thread
+    // remains available for the Winit event loop.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    let mut bridge_event_rx = event_tx.subscribe();
+
+    // The Bridge Task: Listens to the BLE worker's broadcast events and
+    // forwards them directly to the winit loop via the proxy.
+    let proxy_clone = proxy.clone();
+    rt.spawn(async move {
+        while let Ok(event) = bridge_event_rx.recv().await {
+            let _ = proxy_clone.send_event(UserEvent::BleUpdate(event));
+        }
+    });
+
+    // Spawn the BLE worker on the same runtime.
+    let worker_config_rx = config_rx.clone();
+    rt.spawn(async move {
+        if let Err(e) = run_ble_worker(worker_config_rx, event_tx, cmd_rx).await {
             eprintln!("BLE worker error: {}", e);
         }
     });
 
+    // Spawn the Config Watcher Task: Listens for config changes and updates the UI.
+    let mut watcher_config_rx = config_rx;
+    let proxy_watcher = proxy.clone();
+    rt.spawn(async move {
+        while watcher_config_rx.changed().await.is_ok() {
+            let new_config = watcher_config_rx.borrow().clone();
+            let _ = proxy_watcher.send_event(UserEvent::ConfigChanged(new_config));
+        }
+    });
+
+
     let icon_data = vec![255u8; 32 * 32 * 4];
     let icon = Icon::from_rgba(icon_data, 32, 32).expect("Failed to create icon");
 
-    let menu = tray_icon::menu::Menu::new();
-    const ID_NOTIFY: u32 = 0;
-    const ID_SEARCH: u32 = 1;
-    const ID_STATUS: u32 = 2;
-    const ID_QUIT: u32 = 3;
-    const ID_STOP_SEARCH: u32 = 4;
-    const ID_BATTERY: u32 = 5;
+    let tray_menu = TrayMenu::new().expect("Failed to initialize tray menu");
 
-    let notify_item = tray_icon::menu::MenuItem::with_id(ID_NOTIFY, "Notification [ON]", true, None);
-    menu.append(&notify_item).unwrap();
+    TrayIconBuilder::new()
+        .with_menu(Box::new(tray_menu.menu))
+        .with_tooltip("Think Rider")
+        .with_icon(icon)
+        .build()
+        .expect("Could not initiate tray icon");
 
-    let search_item = tray_icon::menu::MenuItem::with_id(ID_SEARCH, "Search Device", true, None);
-    menu.append(&search_item).unwrap();
+    let mut app = TrayApp {
+        cmd_tx,
+        config_tx,
+        items: tray_menu.items,
+    };
 
-    let stop_search_item = tray_icon::menu::MenuItem::with_id(ID_STOP_SEARCH, "Stop Searching", false, None);
-    menu.append(&stop_search_item).unwrap();
-
-    let status_item = tray_icon::menu::MenuItem::with_id(ID_STATUS, "Status: Disconnected", false, None);
-    menu.append(&status_item).unwrap();
-
-    let battery_item = tray_icon::menu::MenuItem::with_id(ID_BATTERY, "Battery: --%", false, None);
-    menu.append(&battery_item).unwrap();
-
-    let quit_item = tray_icon::menu::MenuItem::with_id(ID_QUIT, "Quit", true, None);
-    menu.append(&quit_item).unwrap();
-
-    let _tray_icon = Some(
-        TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
-            .with_tooltip("Think Rider")
-            .with_icon(icon)
-            .build()
-            .unwrap(),
-    );
-
-    let _ = event_loop.run(move |event, event_loop| {
-        event_loop.set_control_flow(ControlFlow::Wait);
-        if let WinitEvent::AboutToWait = event {
-            while let Ok(worker_event) = event_rx.try_recv() {
-                match worker_event {
-                    BleEvent::StatusUpdate(ref new_state) => {
-                        let status_text = match new_state {
-                            State::Disconnected => "Status: Disconnected".to_string(),
-                            State::Searching => "Status: Searching...".to_string(),
-                            State::Connecting { device_address } => format!("Status: Connecting to {}...", device_address),
-                            State::Connected { device_address } => format!("Status: Connected ({})", device_address),
-                            State::Reconnecting { device_address } => format!("Status: Reconnecting to {}...", device_address),
-                        };
-                        status_item.set_text(status_text);
-                        search_item.set_enabled(matches!(new_state, State::Disconnected));
-                        stop_search_item.set_enabled(matches!(new_state, State::Searching));
-                        battery_item.set_enabled(matches!(new_state, State::Connected { .. }));
-                        if !matches!(new_state, State::Connected { .. }) {
-                            battery_item.set_text("Battery: --%");
-                        }
-
-                        if app_state.notifications_enabled {
-                            match new_state {
-                                State::Connected { device_address } => {
-                                    let _ = notify_rust::Notification::new()
-                                        .summary("Think Rider")
-                                        .body(&format!("Connected to {}", device_address))
-                                        .show();
-                                }
-                                State::Disconnected => {
-                                    let _ = notify_rust::Notification::new()
-                                        .summary("Think Rider")
-                                        .body("Disconnected")
-                                        .show();
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    BleEvent::BatteryLevel(level) => {
-                        battery_item.set_text(format!("Battery: {}%", level));
-                    }
-                    BleEvent::KeyPress(key) => {
-                        if app_state.notifications_enabled {
-                            let _ = notify_rust::Notification::new()
-                                .summary("Think Rider")
-                                .body(&format!("Key Pressed: {}", key))
-                                .show();
-                        }
-                    }
-                    BleEvent::Log(_msg) => {}
-                }
-            }
-
-            while let Ok(_tray_event) = TrayIconEvent::receiver().try_recv() {}
-
-            while let Ok(menu_event) = MenuEvent::receiver().try_recv() {
-                let id = menu_event.id();
-                if *id == MenuId(ID_NOTIFY.to_string()) {
-                    app_state.notifications_enabled = !app_state.notifications_enabled;
-                    let _ = notify_tx.send(app_state.notifications_enabled);
-                    notify_item.set_text(if app_state.notifications_enabled { "Notification [ON]" } else { "Notification [OFF]" });
-                } else if *id == MenuId(ID_SEARCH.to_string()) {
-                    let _ = cmd_tx.send(BleCommand::SearchDevice);
-                } else if *id == MenuId(ID_STOP_SEARCH.to_string()) {
-                    let _ = cmd_tx.send(BleCommand::StopSearch);
-                } else if *id == MenuId(ID_QUIT.to_string()) {
-                    std::process::exit(0);
-                }
-            }
-        }
-    });
+    // Final check for file locks    // this will block the main thread as required by winit.
+    event_loop.run_app(&mut app).unwrap();
 }

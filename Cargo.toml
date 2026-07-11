@@ -5,9 +5,11 @@ edition = "2024"
 
 [dependencies]
 btleplug = "0.12.0"
+uuid = { version = "1", features = ["v4"] }
 enigo = "0.6.1"
 futures = "0.3.32"
 tokio = { version = "1.52.3", features = ["full"] }
-tray-icon = "0.14"
-winit = "0.29"
-notify-rust = "4.11"
+tray-icon = "0.24"
+winit = "0.30"
+notify-rust = "4.18"
+strum = { version = "0.28.0", features = ["derive"] }

@@ -1,6 +1,6 @@
-use thinkrider_vs200_rs::{BleConfig, BleCommand, BleEvent, State, run_ble_worker};
 use std::env;
-use tokio::sync::{mpsc, watch};
+use thinkrider_vs200_rs::{BleCommand, BleConfig, BleEvent, run_ble_worker};
+use tokio::sync::{broadcast, mpsc, watch};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -13,25 +13,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-    let (_notify_tx, notify_rx) = watch::channel(config.notifications_enabled);
-
     println!("🚀 Starting Think Rider CLI...");
     if config.debug {
         println!("🛠️ Debug mode enabled");
     }
 
-    // Start the BLE worker in a separate task
-    let worker_config = BleConfig {
-        up_key: config.up_key,
-        down_key: config.down_key,
-        debug: config.debug,
-        notifications_enabled: config.notifications_enabled,
-    };
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = broadcast::channel(16);
+    let (_config_tx, config_rx) = watch::channel(config);
 
+    let worker_config_rx = config_rx.clone();
     tokio::spawn(async move {
-        if let Err(e) = run_ble_worker(worker_config, event_tx, cmd_rx, notify_rx).await {
+        if let Err(e) = run_ble_worker(worker_config_rx, event_tx, cmd_rx).await {
             eprintln!("❌ BLE Worker Error: {}", e);
         }
     });
@@ -41,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("🎧 Listening for events... (Press Ctrl+C to stop)");
 
-    while let Some(event) = event_rx.recv().await {
+    while let Ok(event) = event_rx.recv().await {
         match event {
             BleEvent::StatusUpdate(state) => {
                 match state {
@@ -55,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             BleEvent::Log(msg) => {
-                if config.debug {
+                if config_rx.borrow().debug {
                     println!("📝 Log: {}", msg);
                 }
             }

@@ -75,10 +75,9 @@ enum InternalEvent {
 }
 
 pub async fn run_ble_worker(
-    config: BleConfig,
-    tx_event: mpsc::UnboundedSender<BleEvent>,
+    rx_config: watch::Receiver<BleConfig>,
+    tx_event: broadcast::Sender<BleEvent>,
     mut rx_cmd: mpsc::UnboundedReceiver<BleCommand>,
-    rx_notifications_enabled: watch::Receiver<bool>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let manager = PlatformManager::new().await?;
     let adapters = manager.adapters().await?;
@@ -100,7 +99,7 @@ pub async fn run_ble_worker(
                             task.abort();
                         }
 
-                        if *rx_notifications_enabled.borrow() {
+                        if rx_config.borrow().notifications_enabled {
                             let _ = tx_event.send(BleEvent::Log("User triggered 'Search Device'".into()));
                         }
 
@@ -154,7 +153,7 @@ pub async fn run_ble_worker(
                         let _ = tx_event.send(BleEvent::StatusUpdate(State::Connected { device_address: addr.clone() }));
 
                         let tx_event_clone = tx_event.clone();
-                        let config_clone = config.clone();
+                        let rx_config_clone = rx_config.clone();
 
                         connection_task = Some(tokio::spawn(async move {
                             let mut retry_count = 0;
@@ -175,7 +174,7 @@ pub async fn run_ble_worker(
                                 match handle_peripheral(
                                     peripheral.clone(), 
                                     &tx_event_clone, 
-                                    &config_clone,
+                                    rx_config_clone.clone(),
                                     get_notify_uuid(),
                                     get_battery_uuid()
                                 ).await {
@@ -212,17 +211,20 @@ pub async fn run_ble_worker(
 
 async fn handle_peripheral(
     peripheral: PlatformPeripheral,
-    tx_event: &mpsc::UnboundedSender<BleEvent>,
-    config: &BleConfig,
+    tx_event: &broadcast::Sender<BleEvent>,
+    rx_config: watch::Receiver<BleConfig>,
     notify_uuid: Uuid,
     battery_uuid: Uuid,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut enigo = Enigo::new(&Settings::default())
         .map_err(|e| format!("Failed to initialize keyboard emulator (Enigo): {}", e))?;
 
-    // Safety release: ensure no keys are stuck from previous sessions
-    let _ = enigo.key(config.up_key, Direction::Release);
-    let _ = enigo.key(config.down_key, Direction::Release);
+    {
+        let config = rx_config.borrow();
+        // Safety release: ensure no keys are stuck from previous sessions
+        let _ = enigo.key(config.up_key, Direction::Release);
+        let _ = enigo.key(config.down_key, Direction::Release);
+    }
 
     peripheral.connect().await?;
     peripheral.discover_services().await?;
@@ -258,6 +260,7 @@ async fn handle_peripheral(
                             continue;
                         }
 
+                        let config = rx_config.borrow().clone();
                         if notification.value == SHIFT_UP_PATTERN {
                             if config.debug { let _ = tx_event.send(BleEvent::Log("Pressed: Up".into())); }
                             let _ = tx_event.send(BleEvent::KeyPress("Up".into()));
