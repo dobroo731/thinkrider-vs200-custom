@@ -34,6 +34,18 @@ pub enum State {
     Reconnecting { device_address: Cow<'static, str> },
 }
 
+impl std::fmt::Display for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            State::Disconnected => write!(f, "Disconnected"),
+            State::Searching => write!(f, "Scanning..."),
+            State::Connecting { device_address } => write!(f, "Connecting to {}...", device_address),
+            State::Connected { device_address } => write!(f, "Connected to {}", device_address),
+            State::Reconnecting { device_address } => write!(f, "Reconnecting to {}...", device_address),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum BleEvent {
     StatusUpdate(State),

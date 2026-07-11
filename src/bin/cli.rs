@@ -37,15 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Ok(event) = event_rx.recv().await {
         match event {
             BleEvent::StatusUpdate(state) => {
-                match state {
-                    State::Disconnected => println!("📡 Status: Disconnected"),
-                    State::Searching => println!("🔍 Scanning for device..."),
-                    State::Connecting { device_address } => println!("⏳ Connecting to {}...", device_address),
-                    State::Connected { device_address } => {
-                        println!("✅ Connected to device: {}", device_address);
-                    }
-                    State::Reconnecting { device_address } => println!("🔄 Reconnecting to {}...", device_address),
-                }
+                println!("📡 Status: {}", state);
             }
             BleEvent::Log(msg) => {
                 if config_rx.borrow().debug {
