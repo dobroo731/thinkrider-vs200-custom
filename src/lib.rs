@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use btleplug::api::{Central, Manager, Peripheral, ScanFilter};
 use btleplug::platform::{Manager as PlatformManager, Peripheral as PlatformPeripheral};
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
@@ -13,6 +14,111 @@ pub const NOTIFY_UUID_STR: &str = "0000fea1-0000-1000-8000-00805f9b34fb";
 pub const BATTERY_UUID_STR: &str = "00002a19-0000-1000-8000-00805f9b34fb";
 pub const SHIFT_UP_PATTERN: &[u8] = &[0xf3, 0x05, 0x03, 0x01, 0xfc];
 pub const SHIFT_DOWN_PATTERN: &[u8] = &[0xf3, 0x05, 0x03, 0x00, 0xfb];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum ShiftDirection {
+    Up,
+    Down,
+}
+
+#[async_trait]
+pub trait InteractionHandler: Send + Sync {
+    async fn shift_up(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    async fn shift_down(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+}
+
+pub struct KeyboardInteraction {
+    enigo: Enigo,
+    up_key: Key,
+    down_key: Key,
+}
+
+impl KeyboardInteraction {
+    pub fn new(config: &BleConfig) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let enigo = Enigo::new(&Settings::default())
+            .map_err(|e| format!("Failed to initialize keyboard emulator (Enigo): {}", e))?;
+        Ok(Self {
+            enigo,
+            up_key: config.up_key,
+            down_key: config.down_key,
+        })
+    }
+}
+
+#[async_trait]
+impl InteractionHandler for KeyboardInteraction {
+    async fn shift_up(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.enigo.key(self.up_key, Direction::Press)?;
+        self.enigo.key(self.up_key, Direction::Release)?;
+        Ok(())
+    }
+
+    async fn shift_down(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.enigo.key(self.down_key, Direction::Press)?;
+        self.enigo.key(self.down_key, Direction::Release)?;
+        Ok(())
+    }
+}
+
+pub struct InteractionManager {
+    event_rx: broadcast::Receiver<BleEvent>,
+    config_rx: watch::Receiver<BleConfig>,
+    handler: Box<dyn InteractionHandler>,
+}
+
+impl InteractionManager {
+    pub fn new(
+        event_rx: broadcast::Receiver<BleEvent>,
+        config_rx: watch::Receiver<BleConfig>,
+        handler: Box<dyn InteractionHandler>,
+    ) -> Self {
+        Self {
+            event_rx,
+            config_rx,
+            handler,
+        }
+    }
+
+    pub fn new_keyboard(
+        event_rx: broadcast::Receiver<BleEvent>,
+        config_rx: watch::Receiver<BleConfig>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let handler = {
+            let config = config_rx.borrow();
+            Box::new(KeyboardInteraction::new(&config)?)
+        };
+
+        Ok(Self::new(event_rx, config_rx, handler))
+    }
+
+    pub async fn run(mut self) {
+        loop {
+            tokio::select! {
+                Ok(event) = self.event_rx.recv() => {
+                    if let BleEvent::KeyPress(direction) = event {
+                        let res = match direction {
+                            ShiftDirection::Up => self.handler.shift_up().await,
+                            ShiftDirection::Down => self.handler.shift_down().await,
+                        };
+                        if let Err(e) = res {
+                            eprintln!("Interaction Error ({}): {}", direction, e);
+                        }
+                    }
+                }
+                Ok(_) = self.config_rx.changed() => {
+                    let config = self.config_rx.borrow();
+                        match KeyboardInteraction::new(&config) {
+                            Ok(new_handler) => {
+                                self.handler = Box::new(new_handler);
+                                eprintln!("⚙️  Interaction handler recreated due to keymapping change");
+                            }
+                            Err(e) => eprintln!("❌ Failed to recreate interaction handler: {}", e),
+                    }
+                }
+            }
+        }
+    }
+}
 
 static NOTIFY_UUID: OnceLock<Uuid> = OnceLock::new();
 static BATTERY_UUID: OnceLock<Uuid> = OnceLock::new();
@@ -56,7 +162,7 @@ pub enum BleEvent {
     StatusUpdate(State),
     Log(Cow<'static, str>),
     BatteryLevel(u8),
-    KeyPress(Cow<'static, str>),
+    KeyPress(ShiftDirection),
 }
 
 #[derive(Debug, Clone)]
@@ -111,18 +217,6 @@ impl BleContext {
         }
     }
 
-    async fn handle_keystroke(&self, key_name: &'static str, key_enum: Key, enigo: &mut Enigo) {
-        let config = self.rx_config.borrow();
-        if config.debug {
-            let _ = self
-                .tx_event
-                .send(BleEvent::Log(format!("Pressed: {}", key_name).into()));
-        }
-        let _ = self.tx_event.send(BleEvent::KeyPress(key_name.into()));
-        let _ = enigo.key(key_enum, Direction::Press);
-        let _ = enigo.key(key_enum, Direction::Release);
-    }
-
     fn find_characteristic<'a>(
         &self,
         chars: &'a std::collections::BTreeSet<btleplug::api::Characteristic>,
@@ -131,7 +225,7 @@ impl BleContext {
         chars.iter().find(|c| c.uuid == uuid)
     }
 
-    async fn handle_notification(&self, uuid: Uuid, value: &[u8], enigo: &mut Enigo) {
+    async fn handle_notification(&self, uuid: Uuid, value: &[u8]) {
         let battery_uuid = get_battery_uuid();
         if uuid == battery_uuid {
             if let Some(&level) = value.first() {
@@ -140,10 +234,19 @@ impl BleContext {
             return;
         }
 
-        let config = self.rx_config.borrow().clone();
         match value {
-            SHIFT_UP_PATTERN => self.handle_keystroke("Up", config.up_key, enigo).await,
-            SHIFT_DOWN_PATTERN => self.handle_keystroke("Down", config.down_key, enigo).await,
+            SHIFT_UP_PATTERN => {
+                if self.rx_config.borrow().debug {
+                    let _ = self.tx_event.send(BleEvent::Log("Pressed: Up".into()));
+                }
+                let _ = self.tx_event.send(BleEvent::KeyPress(ShiftDirection::Up));
+            }
+            SHIFT_DOWN_PATTERN => {
+                if self.rx_config.borrow().debug {
+                    let _ = self.tx_event.send(BleEvent::Log("Pressed: Down".into()));
+                }
+                let _ = self.tx_event.send(BleEvent::KeyPress(ShiftDirection::Down));
+            }
             _ => {}
         }
     }
@@ -181,7 +284,6 @@ impl BleContext {
         &self,
         peripheral: &PlatformPeripheral,
         battery_char: &Option<btleplug::api::Characteristic>,
-        enigo: &mut Enigo,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let mut notifications = peripheral.notifications().await?;
         let mut battery_poll_interval = tokio::time::interval(std::time::Duration::from_secs(300));
@@ -190,7 +292,7 @@ impl BleContext {
             tokio::select! {
                 maybe_notification = notifications.next() => {
                     match maybe_notification {
-                        Some(n) => self.handle_notification(n.uuid, &n.value, enigo).await,
+                        Some(n) => self.handle_notification(n.uuid, &n.value).await,
                         None => {
                             let _ = self.tx_event.send(BleEvent::Log("BLE notification stream closed".into()));
                             return Err("Notification stream terminated".into());
@@ -208,18 +310,8 @@ impl BleContext {
         self: Arc<Self>,
         peripheral: PlatformPeripheral,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let mut enigo = Enigo::new(&Settings::default())
-            .map_err(|e| format!("Failed to initialize keyboard emulator (Enigo): {}", e))?;
-
-        {
-            let config = self.rx_config.borrow();
-            let _ = enigo.key(config.up_key, Direction::Release);
-            let _ = enigo.key(config.down_key, Direction::Release);
-        }
-
         let battery_char = self.setup_peripheral(&peripheral).await?;
-        self.process_notifications(&peripheral, &battery_char, &mut enigo)
-            .await
+        self.process_notifications(&peripheral, &battery_char).await
     }
 }
 

@@ -215,10 +215,26 @@ fn main() {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (event_tx, _event_rx) = broadcast::channel(16);
 
+    // Initialize the interaction manager with default keyboard behavior.
+    let manager = match thinkrider_vs200_rs::InteractionManager::new_keyboard(
+        event_tx.subscribe(),
+        config_rx.clone(),
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("❌ Failed to initialize Interaction Manager: {}", e);
+            std::process::exit(1);
+        }
+    };
+
     // Initialize the Tokio runtime first.
     // We do this manually instead of using #[tokio::main] so that the main thread
     // remains available for the Winit event loop.
     let rt = tokio::runtime::Runtime::new().unwrap();
+
+    rt.spawn(async move {
+        manager.run().await;
+    });
 
     let mut bridge_event_rx = event_tx.subscribe();
 
@@ -243,8 +259,9 @@ fn main() {
 
     // Spawn the BLE worker on the same runtime.
     let worker_config_rx = config_rx.clone();
+    let event_tx_clone = event_tx.clone();
     rt.spawn(async move {
-        let worker = match BleWorker::new(worker_config_rx, event_tx, cmd_rx).await {
+        let worker = match BleWorker::new(worker_config_rx, event_tx_clone, cmd_rx).await {
             Ok(w) => w,
             Err(e) => {
                 eprintln!("❌ Failed to initialize BLE Worker: {}", e);

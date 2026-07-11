@@ -3,7 +3,7 @@ use thinkrider_vs200_rs::{BleCommand, BleConfig, BleEvent, BleWorker};
 use tokio::sync::{broadcast, mpsc, watch};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Vec<String> = env::args().collect();
     let mut config = BleConfig::default();
 
@@ -22,9 +22,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (event_tx, mut event_rx) = broadcast::channel(16);
     let (_config_tx, config_rx) = watch::channel(config);
 
-    let worker_config_rx = config_rx.clone();
+    // Initialize the interaction manager with default keyboard behavior.
+    let manager = thinkrider_vs200_rs::InteractionManager::new_keyboard(
+        event_tx.subscribe(),
+        config_rx.clone(),
+    )?;
     tokio::spawn(async move {
-        let worker = match BleWorker::new(worker_config_rx, event_tx, cmd_rx).await {
+        manager.run().await;
+    });
+
+    let worker_config_rx = config_rx.clone();
+    let event_tx_clone = event_tx.clone();
+    tokio::spawn(async move {
+        let worker = match BleWorker::new(worker_config_rx, event_tx_clone, cmd_rx).await {
             Ok(w) => w,
             Err(e) => {
                 eprintln!("❌ Failed to initialize BLE Worker: {}", e);
