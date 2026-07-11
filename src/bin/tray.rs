@@ -249,7 +249,6 @@ fn main() {
         }
     });
 
-
     let icon_data = vec![255u8; 32 * 32 * 4];
     let icon = Icon::from_rgba(icon_data, 32, 32).expect("Failed to create icon");
 

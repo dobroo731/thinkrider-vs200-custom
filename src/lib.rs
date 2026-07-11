@@ -1,12 +1,12 @@
 use btleplug::api::{Central, Manager, Peripheral, ScanFilter};
-use uuid::Uuid;
-use std::sync::OnceLock;
 use btleplug::platform::{Manager as PlatformManager, Peripheral as PlatformPeripheral};
-use enigo::{Enigo, Keyboard, Key, Settings, Direction};
-use tokio::sync::{mpsc, watch, broadcast};
+use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+use futures::stream::StreamExt;
 use std::borrow::Cow;
 use std::error::Error;
-use futures::stream::StreamExt;
+use std::sync::OnceLock;
+use tokio::sync::{broadcast, mpsc, watch};
+use uuid::Uuid;
 
 async fn read_battery_level(
     peripheral: &PlatformPeripheral,
@@ -15,12 +15,16 @@ async fn read_battery_level(
 ) {
     if let Some(bc) = characteristic
         && let Ok(val) = peripheral.read(bc).await
-        && let Some(&level) = val.first() {
+        && let Some(&level) = val.first()
+    {
         let _ = tx_event.send(BleEvent::BatteryLevel(level));
     }
 }
 
-fn find_characteristic(chars: &std::collections::BTreeSet<btleplug::api::Characteristic>, uuid: Uuid) -> Option<&btleplug::api::Characteristic> {
+fn find_characteristic(
+    chars: &std::collections::BTreeSet<btleplug::api::Characteristic>,
+    uuid: Uuid,
+) -> Option<&btleplug::api::Characteristic> {
     chars.iter().find(|c| c.uuid == uuid)
 }
 
@@ -31,8 +35,8 @@ async fn handle_keystroke(
     key_enum: Key,
     enigo: &mut Enigo,
 ) {
-    if config.debug { 
-        let _ = tx_event.send(BleEvent::Log(format!("Pressed: {}", key_name).into())); 
+    if config.debug {
+        let _ = tx_event.send(BleEvent::Log(format!("Pressed: {}", key_name).into()));
     }
     let _ = tx_event.send(BleEvent::KeyPress(key_name.into()));
     let _ = enigo.key(key_enum, Direction::Press);
@@ -53,7 +57,8 @@ fn get_notify_uuid() -> Uuid {
 }
 
 fn get_battery_uuid() -> Uuid {
-    *BATTERY_UUID.get_or_init(|| Uuid::parse_str(BATTERY_UUID_STR).expect("Invalid BATTERY_UUID_STR"))
+    *BATTERY_UUID
+        .get_or_init(|| Uuid::parse_str(BATTERY_UUID_STR).expect("Invalid BATTERY_UUID_STR"))
 }
 
 #[derive(Debug, Clone)]
@@ -70,9 +75,13 @@ impl std::fmt::Display for State {
         match self {
             State::Disconnected => write!(f, "Disconnected"),
             State::Searching => write!(f, "Scanning..."),
-            State::Connecting { device_address } => write!(f, "Connecting to {}...", device_address),
+            State::Connecting { device_address } => {
+                write!(f, "Connecting to {}...", device_address)
+            }
             State::Connected { device_address } => write!(f, "Connected to {}", device_address),
-            State::Reconnecting { device_address } => write!(f, "Reconnecting to {}...", device_address),
+            State::Reconnecting { device_address } => {
+                write!(f, "Reconnecting to {}...", device_address)
+            }
         }
     }
 }
@@ -124,15 +133,23 @@ pub async fn run_ble_worker(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let manager = PlatformManager::new().await?;
     let adapters = manager.adapters().await?;
-    let adapter = adapters.into_iter().next().ok_or("No Bluetooth adapter found")?;
+    let adapter = adapters
+        .into_iter()
+        .next()
+        .ok_or("No Bluetooth adapter found")?;
 
     let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<InternalEvent>();
     let mut scan_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut connection_task: Option<tokio::task::JoinHandle<()>> = None;
 
-    let stop_tasks = |scan: &mut Option<tokio::task::JoinHandle<()>>, conn: &mut Option<tokio::task::JoinHandle<()>>| {
-        if let Some(t) = scan.take() { t.abort(); }
-        if let Some(t) = conn.take() { t.abort(); }
+    let stop_tasks = |scan: &mut Option<tokio::task::JoinHandle<()>>,
+                      conn: &mut Option<tokio::task::JoinHandle<()>>| {
+        if let Some(t) = scan.take() {
+            t.abort();
+        }
+        if let Some(t) = conn.take() {
+            t.abort();
+        }
     };
 
     loop {
@@ -207,8 +224,8 @@ pub async fn run_ble_worker(
                                 let _ = tx_event_clone.send(BleEvent::StatusUpdate(status));
 
                                 match handle_peripheral(
-                                    peripheral.clone(), 
-                                    &tx_event_clone, 
+                                    peripheral.clone(),
+                                    &tx_event_clone,
                                     rx_config_clone.clone(),
                                     get_notify_uuid(),
                                     get_battery_uuid(),
@@ -274,7 +291,8 @@ async fn handle_peripheral(
     // 2. Setup Battery Notifications
     let battery_char = find_characteristic(&chars, battery_uuid).cloned();
     if let Some(bc) = &battery_char
-        && peripheral.subscribe(bc).await.is_ok() {
+        && peripheral.subscribe(bc).await.is_ok()
+    {
         read_battery_level(&peripheral, &battery_char, tx_event).await;
     }
 
