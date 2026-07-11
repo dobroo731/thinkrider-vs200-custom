@@ -34,24 +34,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("🎧 Listening for events... (Press Ctrl+C to stop)");
 
-    while let Ok(event) = event_rx.recv().await {
-        match event {
-            BleEvent::StatusUpdate(state) => {
-                println!("📡 Status: {}", state);
-            }
-            BleEvent::Log(msg) => {
-                if config_rx.borrow().debug {
-                    println!("📝 Log: {}", msg);
+    loop {
+        match event_rx.recv().await {
+            Ok(event) => match event {
+                BleEvent::StatusUpdate(state) => {
+                    println!("📡 Status: {}", state);
                 }
-            }
-            BleEvent::BatteryLevel(level) => {
-                println!("🔋 Battery level: {}%", level);
-                if level <= 20 {
-                    println!("⚠️ Low battery warning!");
+                BleEvent::Log(msg) => {
+                    if config_rx.borrow().debug {
+                        println!("📝 Log: {}", msg);
+                    }
                 }
+                BleEvent::BatteryLevel(level) => {
+                    println!("🔋 Battery level: {}%", level);
+                    if level <= 20 {
+                        println!("⚠️ Low battery warning!");
+                    }
+                }
+                BleEvent::KeyPress(key) => {
+                    println!("⌨️ Key Pressed: {}", key);
+                }
+            },
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                eprintln!("⚠️  Warning: receiver lagged, missed {} messages", n);
             }
-            BleEvent::KeyPress(key) => {
-                println!("⌨️ Key Pressed: {}", key);
+            Err(broadcast::error::RecvError::Closed) => {
+                eprintln!("❌ Event channel closed. Exiting...");
+                break;
             }
         }
     }

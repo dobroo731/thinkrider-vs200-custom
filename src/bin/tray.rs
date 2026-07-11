@@ -226,8 +226,18 @@ fn main() {
     // forwards them directly to the winit loop via the proxy.
     let proxy_clone = proxy.clone();
     rt.spawn(async move {
-        while let Ok(event) = bridge_event_rx.recv().await {
-            let _ = proxy_clone.send_event(UserEvent::BleUpdate(event));
+        loop {
+            match bridge_event_rx.recv().await {
+                Ok(event) => {
+                    let _ = proxy_clone.send_event(UserEvent::BleUpdate(event));
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    eprintln!("⚠️  Tray Bridge lagged");
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    break;
+                }
+            }
         }
     });
 
