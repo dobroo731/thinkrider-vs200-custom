@@ -3,10 +3,41 @@ use uuid::Uuid;
 use std::sync::OnceLock;
 use btleplug::platform::{Manager as PlatformManager, Peripheral as PlatformPeripheral};
 use enigo::{Enigo, Keyboard, Key, Settings, Direction};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, broadcast};
 use std::borrow::Cow;
 use std::error::Error;
 use futures::stream::StreamExt;
+
+async fn read_battery_level(
+    peripheral: &PlatformPeripheral,
+    characteristic: &Option<btleplug::api::Characteristic>,
+    tx_event: &broadcast::Sender<BleEvent>,
+) {
+    if let Some(bc) = characteristic
+        && let Ok(val) = peripheral.read(bc).await
+        && let Some(&level) = val.first() {
+        let _ = tx_event.send(BleEvent::BatteryLevel(level));
+    }
+}
+
+fn find_characteristic(chars: &std::collections::BTreeSet<btleplug::api::Characteristic>, uuid: Uuid) -> Option<&btleplug::api::Characteristic> {
+    chars.iter().find(|c| c.uuid == uuid)
+}
+
+async fn handle_keystroke(
+    tx_event: &broadcast::Sender<BleEvent>,
+    config: &BleConfig,
+    key_name: &'static str,
+    key_enum: Key,
+    enigo: &mut Enigo,
+) {
+    if config.debug { 
+        let _ = tx_event.send(BleEvent::Log(format!("Pressed: {}", key_name).into())); 
+    }
+    let _ = tx_event.send(BleEvent::KeyPress(key_name.into()));
+    let _ = enigo.key(key_enum, Direction::Press);
+    let _ = enigo.key(key_enum, Direction::Release);
+}
 
 pub const DEVICE_NAME_FILTER: &str = "Think VS01-";
 pub const NOTIFY_UUID_STR: &str = "0000fea1-0000-1000-8000-00805f9b34fb";
@@ -99,17 +130,17 @@ pub async fn run_ble_worker(
     let mut scan_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut connection_task: Option<tokio::task::JoinHandle<()>> = None;
 
+    let stop_tasks = |scan: &mut Option<tokio::task::JoinHandle<()>>, conn: &mut Option<tokio::task::JoinHandle<()>>| {
+        if let Some(t) = scan.take() { t.abort(); }
+        if let Some(t) = conn.take() { t.abort(); }
+    };
+
     loop {
         tokio::select! {
             Some(cmd) = rx_cmd.recv() => {
                 match cmd {
                     BleCommand::SearchDevice => {
-                        if let Some(task) = scan_task.take() {
-                            task.abort();
-                        }
-                        if let Some(task) = connection_task.take() {
-                            task.abort();
-                        }
+                        stop_tasks(&mut scan_task, &mut connection_task);
 
                         if rx_config.borrow().notifications_enabled {
                             let _ = tx_event.send(BleEvent::Log("User triggered 'Search Device'".into()));
@@ -147,12 +178,7 @@ pub async fn run_ble_worker(
                         }));
                     }
                     BleCommand::StopSearch => {
-                        if let Some(task) = scan_task.take() {
-                            task.abort();
-                        }
-                        if let Some(task) = connection_task.take() {
-                            task.abort();
-                        }
+                        stop_tasks(&mut scan_task, &mut connection_task);
                         let _ = tx_event.send(BleEvent::StatusUpdate(State::Disconnected));
                         let _ = tx_event.send(BleEvent::Log("Search stopped by user".into()));
                     }
@@ -173,22 +199,19 @@ pub async fn run_ble_worker(
                             let mut backoff = std::time::Duration::from_secs(1);
 
                             loop {
-                                if retry_count > 0 {
-                                    let _ = tx_event_clone.send(BleEvent::StatusUpdate(State::Reconnecting {
-                                        device_address: addr.clone()
-                                    }));
+                                let status = if retry_count > 0 {
+                                    State::Reconnecting { device_address: addr.clone() }
                                 } else {
-                                    let _ = tx_event_clone.send(BleEvent::StatusUpdate(State::Connected {
-                                        device_address: addr.clone()
-                                    }));
-                                }
+                                    State::Connected { device_address: addr.clone() }
+                                };
+                                let _ = tx_event_clone.send(BleEvent::StatusUpdate(status));
 
                                 match handle_peripheral(
                                     peripheral.clone(), 
                                     &tx_event_clone, 
                                     rx_config_clone.clone(),
                                     get_notify_uuid(),
-                                    get_battery_uuid()
+                                    get_battery_uuid(),
                                 ).await {
                                     Ok(_) => {
                                         let _ = tx_event_clone.send(BleEvent::Log("Peripheral session ended gracefully".into()));
@@ -244,17 +267,15 @@ async fn handle_peripheral(
     let chars = peripheral.characteristics();
 
     // 1. Setup Keystroke Notifications
-    let notify_char = chars.iter().find(|c| c.uuid == notify_uuid)
+    let notify_char = find_characteristic(&chars, notify_uuid)
         .ok_or("Could not find notification characteristic")?;
     peripheral.subscribe(notify_char).await?;
 
     // 2. Setup Battery Notifications
-    let battery_char = chars.iter().find(|c| c.uuid == battery_uuid).cloned();
+    let battery_char = find_characteristic(&chars, battery_uuid).cloned();
     if let Some(bc) = &battery_char
-        && peripheral.subscribe(bc).await.is_ok()
-        && let Ok(val) = peripheral.read(bc).await
-        && let Some(&level) = val.first() {
-        let _ = tx_event.send(BleEvent::BatteryLevel(level));
+        && peripheral.subscribe(bc).await.is_ok() {
+        read_battery_level(&peripheral, &battery_char, tx_event).await;
     }
 
     let mut notifications = peripheral.notifications().await?;
@@ -273,16 +294,10 @@ async fn handle_peripheral(
                         }
 
                         let config = rx_config.borrow().clone();
-                        if notification.value == SHIFT_UP_PATTERN {
-                            if config.debug { let _ = tx_event.send(BleEvent::Log("Pressed: Up".into())); }
-                            let _ = tx_event.send(BleEvent::KeyPress("Up".into()));
-                            let _ = enigo.key(config.up_key, Direction::Press);
-                            let _ = enigo.key(config.up_key, Direction::Release);
-                        } else if notification.value == SHIFT_DOWN_PATTERN {
-                            if config.debug { let _ = tx_event.send(BleEvent::Log("Pressed: Down".into())); }
-                            let _ = tx_event.send(BleEvent::KeyPress("Down".into()));
-                            let _ = enigo.key(config.down_key, Direction::Press);
-                            let _ = enigo.key(config.down_key, Direction::Release);
+                        match notification.value.as_slice() {
+                            SHIFT_UP_PATTERN => handle_keystroke(tx_event, &config, "Up", config.up_key, &mut enigo).await,
+                            SHIFT_DOWN_PATTERN => handle_keystroke(tx_event, &config, "Down", config.down_key, &mut enigo).await,
+                            _ => {}
                         }
                     }
                     None => {
@@ -292,11 +307,7 @@ async fn handle_peripheral(
                 }
             }
             _ = battery_poll_interval.tick() => {
-                if let Some(bc) = &battery_char
-                    && let Ok(val) = peripheral.read(bc).await
-                    && let Some(&level) = val.first() {
-                    let _ = tx_event.send(BleEvent::BatteryLevel(level));
-                }
+                read_battery_level(&peripheral, &battery_char, tx_event).await;
             }
         }
     }
