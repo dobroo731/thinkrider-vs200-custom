@@ -592,19 +592,15 @@ impl BleWorker {
         let scan_future = async {
             while let Some(event) = events.next().await {
                 if let btleplug::api::CentralEvent::DeviceDiscovered(peripheral_id) = event {
-                    let device = async {
-                        let peripheral = adapter.peripheral(&peripheral_id).await.ok()?;
-                        let properties = peripheral.properties().await.ok()??;
-                        if profile.matches(properties.local_name.as_deref()) {
-                            Some(BleDevice::new(profile.clone(), peripheral))
-                        } else {
-                            None
-                        }
-                    }
-                    .await;
+                    let Ok(peripheral) = adapter.peripheral(&peripheral_id).await else {
+                        continue;
+                    };
+                    let Ok(Some(properties)) = peripheral.properties().await else {
+                        continue;
+                    };
 
-                    if let Some(found_device) = device {
-                        return Ok(found_device);
+                    if profile.matches(properties.local_name.as_deref()) {
+                        return Ok(BleDevice::new(profile.clone(), peripheral));
                     }
                 }
             }
