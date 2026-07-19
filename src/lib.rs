@@ -62,10 +62,7 @@ pub trait BleDeviceProfile: Send + Sync {
         }
 
         let notify = notify?;
-        Some(DeviceCharacteristics {
-            notify,
-            battery,
-        })
+        Some(DeviceCharacteristics { notify, battery })
     }
 
     fn parse_notification(&self, uuid: Uuid, value: &[u8]) -> Option<BleEvent> {
@@ -299,13 +296,26 @@ impl InteractionManager {
     pub async fn run(mut self) {
         loop {
             tokio::select! {
-                Ok(event) = self.event_receiver.recv() => {
-                    if let BleEvent::KeyPress(direction) = event {
-                        let result = match direction {
-                            ShiftDirection::Up => self.handler.shift_up().await,
-                            ShiftDirection::Down => self.handler.shift_down().await,
-                        };
-                        if let Err(error) = result { eprintln!("Interaction Error ({}): {}", direction, error); }
+                recv_result = self.event_receiver.recv() => {
+                    match recv_result {
+                        Ok(event) => {
+                            if let BleEvent::KeyPress(direction) = event {
+                                let result = match direction {
+                                    ShiftDirection::Up => self.handler.shift_up().await,
+                                    ShiftDirection::Down => self.handler.shift_down().await,
+                                };
+                                if let Err(error) = result {
+                                    eprintln!("Interaction Error ({}): {}", direction, error);
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            eprintln!("Interaction Manager lagged: some events were missed");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            eprintln!("Event channel closed; shutting down Interaction Manager");
+                            break;
+                        }
                     }
                 }
                 Ok(_) = self.config_receiver.changed() => {
@@ -456,49 +466,49 @@ pub enum InteractionType {
 
 pub struct BleContext {
     profile: Arc<dyn BleDeviceProfile>,
-    tx_event: broadcast::Sender<BleEvent>,
-    rx_config: watch::Receiver<BleConfig>,
+    event_sender: broadcast::Sender<BleEvent>,
+    config_receiver: watch::Receiver<BleConfig>,
 }
 
 impl BleContext {
     fn new(
         profile: Arc<dyn BleDeviceProfile>,
-        tx_event: broadcast::Sender<BleEvent>,
-        rx_config: watch::Receiver<BleConfig>,
+        event_sender: broadcast::Sender<BleEvent>,
+        config_receiver: watch::Receiver<BleConfig>,
     ) -> Self {
         Self {
             profile,
-            tx_event,
-            rx_config,
+            event_sender,
+            config_receiver,
         }
     }
 
     async fn read_battery_level(&self, device: &BleDevice) -> BleResult<()> {
         match device.read_battery().await {
-            Ok(Some(lvl)) => {
-                let _ = self.tx_event.send(BleEvent::BatteryLevel(lvl));
+            Ok(Some(level)) => {
+                let _ = self.event_sender.send(BleEvent::BatteryLevel(level));
                 Ok(())
             }
             Ok(None) => Ok(()),
-            Err(e) => {
-                let _ = self
-                    .tx_event
-                    .send(BleEvent::Log(format!("Battery read error: {}", e).into()));
-                Err(e)
+            Err(error) => {
+                let _ = self.event_sender.send(BleEvent::Log(
+                    format!("Battery read error: {}", error).into(),
+                ));
+                Err(error)
             }
         }
     }
 
     fn handle_notification(&self, device: &BleDevice, uuid: Uuid, value: &[u8]) {
         if let Some(event) = device.parse_notification(uuid, value) {
-            if let BleEvent::KeyPress(dir) = event
-                && self.rx_config.borrow().debug
+            if let BleEvent::KeyPress(direction) = event
+                && self.config_receiver.borrow().debug
             {
                 let _ = self
-                    .tx_event
-                    .send(BleEvent::Log(format!("Pressed: {}", dir).into()));
+                    .event_sender
+                    .send(BleEvent::Log(format!("Pressed: {}", direction).into()));
             }
-            let _ = self.tx_event.send(event);
+            let _ = self.event_sender.send(event);
         }
     }
 
@@ -509,10 +519,10 @@ impl BleContext {
     }
 
     async fn process_notifications(&self, device: &mut BleDevice) -> BleResult<()> {
-        let dev = device.clone();
+        let device_clone = device.clone();
         device
-            .listen(move |n| {
-                self.handle_notification(&dev, n.uuid, &n.value);
+            .listen(move |notification| {
+                self.handle_notification(&device_clone, notification.uuid, &notification.value);
             })
             .await
     }
@@ -520,14 +530,14 @@ impl BleContext {
     async fn handle_peripheral(self: Arc<Self>, mut device: BleDevice) -> BleResult<()> {
         self.setup_device(&mut device).await?;
 
-        let dev_for_poll = device.clone();
-        let ctx_for_poll = self.clone();
+        let device_for_poll = device.clone();
+        let context_for_poll = self.clone();
         tokio::spawn(async move {
-            let mut poll = tokio::time::interval(Duration::from_secs(300));
+            let mut poll_interval = tokio::time::interval(Duration::from_secs(300));
             loop {
-                poll.tick().await;
-                if ctx_for_poll
-                    .read_battery_level(&dev_for_poll)
+                poll_interval.tick().await;
+                if context_for_poll
+                    .read_battery_level(&device_for_poll)
                     .await
                     .is_err()
                 {
@@ -557,9 +567,9 @@ pub struct BleWorker {
 impl BleWorker {
     pub async fn new<P: BleDeviceProfile + 'static>(
         profile: P,
-        rx_config: watch::Receiver<BleConfig>,
-        tx_event: broadcast::Sender<BleEvent>,
-        rx_cmd: mpsc::UnboundedReceiver<BleCommand>,
+        config_receiver: watch::Receiver<BleConfig>,
+        event_sender: broadcast::Sender<BleEvent>,
+        command_receiver: mpsc::UnboundedReceiver<BleCommand>,
     ) -> BleResult<Self> {
         let adapter = PlatformManager::new()
             .await?
@@ -569,10 +579,14 @@ impl BleWorker {
             .next()
             .ok_or(BleError::NoAdapterAvailable)?;
         let (internal_tx, internal_rx) = mpsc::unbounded_channel();
-        let ctx = Arc::new(BleContext::new(Arc::new(profile), tx_event, rx_config));
+        let ctx = Arc::new(BleContext::new(
+            Arc::new(profile),
+            event_sender,
+            config_receiver,
+        ));
         Ok(Self {
             ctx,
-            rx_cmd,
+            rx_cmd: command_receiver,
             adapter,
             internal_tx,
             internal_rx,
@@ -635,7 +649,7 @@ impl BleWorker {
     async fn start_connection_session(&self, device: BleDevice) {
         let addr: Cow<'static, str> = Cow::Owned(device.address().to_string());
         let ctx = self.ctx.clone();
-        let tx_event = ctx.tx_event.clone();
+        let tx_event = ctx.event_sender.clone();
 
         tokio::spawn(async move {
             let mut retry_count = 0;
@@ -684,18 +698,18 @@ impl BleWorker {
 
                     match cmd {
                         BleCommand::SearchDevice => {
-                            let _ = self.ctx.tx_event.send(BleEvent::StatusUpdate(State::Searching));
+                            let _ = self.ctx.event_sender.send(BleEvent::StatusUpdate(State::Searching));
                             scan_task = Some(tokio::spawn(Self::execute_scan(self.adapter.clone(), self.ctx.profile.clone(), self.internal_tx.clone())));
                         }
                         BleCommand::StopSearch => {
-                            let _ = self.ctx.tx_event.send(BleEvent::StatusUpdate(State::Disconnected));
+                            let _ = self.ctx.event_sender.send(BleEvent::StatusUpdate(State::Disconnected));
                         }
                     }
                 }
                 Some(ev) = self.internal_rx.recv() => match ev {
                     InternalEvent::DeviceFound(d) => self.start_connection_session(d).await,
-                    InternalEvent::StatusUpdate(s) => { let _ = self.ctx.tx_event.send(BleEvent::StatusUpdate(s)); }
-                    InternalEvent::Log(m) => { let _ = self.ctx.tx_event.send(BleEvent::Log(m)); }
+                    InternalEvent::StatusUpdate(s) => { let _ = self.ctx.event_sender.send(BleEvent::StatusUpdate(s)); }
+                    InternalEvent::Log(m) => { let _ = self.ctx.event_sender.send(BleEvent::Log(m)); }
                 }
             }
         }
