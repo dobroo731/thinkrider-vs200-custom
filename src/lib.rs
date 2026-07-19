@@ -557,11 +557,11 @@ enum InternalEvent {
 }
 
 pub struct BleWorker {
-    ctx: Arc<BleContext>,
+    context: Arc<BleContext>,
     rx_cmd: mpsc::UnboundedReceiver<BleCommand>,
     adapter: btleplug::platform::Adapter,
-    internal_tx: mpsc::UnboundedSender<InternalEvent>,
-    internal_rx: mpsc::UnboundedReceiver<InternalEvent>,
+    internal_sender: mpsc::UnboundedSender<InternalEvent>,
+    internal_receiver: mpsc::UnboundedReceiver<InternalEvent>,
 }
 
 impl BleWorker {
@@ -578,35 +578,35 @@ impl BleWorker {
             .into_iter()
             .next()
             .ok_or(BleError::NoAdapterAvailable)?;
-        let (internal_tx, internal_rx) = mpsc::unbounded_channel();
-        let ctx = Arc::new(BleContext::new(
+        let (internal_sender, internal_receiver) = mpsc::unbounded_channel();
+        let context = Arc::new(BleContext::new(
             Arc::new(profile),
             event_sender,
             config_receiver,
         ));
         Ok(Self {
-            ctx,
+            context,
             rx_cmd: command_receiver,
             adapter,
-            internal_tx,
-            internal_rx,
+            internal_sender,
+            internal_receiver,
         })
     }
 
     async fn execute_scan(
         adapter: btleplug::platform::Adapter,
         profile: Arc<dyn BleDeviceProfile>,
-        tx: mpsc::UnboundedSender<InternalEvent>,
+        internal_sender: mpsc::UnboundedSender<InternalEvent>,
     ) {
         if let Err(e) = adapter.start_scan(ScanFilter::default()).await {
-            let _ = tx.send(InternalEvent::Log(format!("Scan error: {}", e).into()));
+            let _ = internal_sender.send(InternalEvent::Log(format!("Scan error: {}", e).into()));
             return;
         }
 
         let mut events = match adapter.events().await {
             Ok(e) => e,
             Err(e) => {
-                let _ = tx.send(InternalEvent::Log(
+                let _ = internal_sender.send(InternalEvent::Log(
                     format!("Failed to get adapter events: {}", e).into(),
                 ));
                 return;
@@ -631,7 +631,7 @@ impl BleWorker {
                         }.await;
 
                         if let Some(d) = device {
-                            let _ = tx.send(InternalEvent::DeviceFound(d));
+                            let _ = internal_sender.send(InternalEvent::DeviceFound(d));
                             return;
                         }
                     }
@@ -643,13 +643,13 @@ impl BleWorker {
                 }
             }
         }
-        let _ = tx.send(InternalEvent::StatusUpdate(State::Disconnected));
+        let _ = internal_sender.send(InternalEvent::StatusUpdate(State::Disconnected));
     }
 
     async fn start_connection_session(&self, device: BleDevice) {
         let addr: Cow<'static, str> = Cow::Owned(device.address().to_string());
-        let ctx = self.ctx.clone();
-        let tx_event = ctx.event_sender.clone();
+        let context = self.context.clone();
+        let event_sender = context.event_sender.clone();
 
         tokio::spawn(async move {
             let mut retry_count = 0;
@@ -665,12 +665,12 @@ impl BleWorker {
                         device_address: addr.clone(),
                     }
                 };
-                let _ = tx_event.send(BleEvent::StatusUpdate(status));
+                let _ = event_sender.send(BleEvent::StatusUpdate(status));
 
-                match ctx.clone().handle_peripheral(device.clone()).await {
+                match context.clone().handle_peripheral(device.clone()).await {
                     Ok(_) => break,
                     Err(e) => {
-                        let _ = tx_event.send(BleEvent::Log(
+                        let _ = event_sender.send(BleEvent::Log(
                             format!("Connection lost: {}. Retrying...", e).into(),
                         ));
                         retry_count += 1;
@@ -682,7 +682,7 @@ impl BleWorker {
                     }
                 }
             }
-            let _ = tx_event.send(BleEvent::StatusUpdate(State::Disconnected));
+            let _ = event_sender.send(BleEvent::StatusUpdate(State::Disconnected));
         });
     }
 
@@ -698,18 +698,18 @@ impl BleWorker {
 
                     match cmd {
                         BleCommand::SearchDevice => {
-                            let _ = self.ctx.event_sender.send(BleEvent::StatusUpdate(State::Searching));
-                            scan_task = Some(tokio::spawn(Self::execute_scan(self.adapter.clone(), self.ctx.profile.clone(), self.internal_tx.clone())));
+                            let _ = self.context.event_sender.send(BleEvent::StatusUpdate(State::Searching));
+                            scan_task = Some(tokio::spawn(Self::execute_scan(self.adapter.clone(), self.context.profile.clone(), self.internal_sender.clone())));
                         }
                         BleCommand::StopSearch => {
-                            let _ = self.ctx.event_sender.send(BleEvent::StatusUpdate(State::Disconnected));
+                            let _ = self.context.event_sender.send(BleEvent::StatusUpdate(State::Disconnected));
                         }
                     }
                 }
-                Some(ev) = self.internal_rx.recv() => match ev {
+                Some(ev) = self.internal_receiver.recv() => match ev {
                     InternalEvent::DeviceFound(d) => self.start_connection_session(d).await,
-                    InternalEvent::StatusUpdate(s) => { let _ = self.ctx.event_sender.send(BleEvent::StatusUpdate(s)); }
-                    InternalEvent::Log(m) => { let _ = self.ctx.event_sender.send(BleEvent::Log(m)); }
+                    InternalEvent::StatusUpdate(s) => { let _ = self.context.event_sender.send(BleEvent::StatusUpdate(s)); }
+                    InternalEvent::Log(m) => { let _ = self.context.event_sender.send(BleEvent::Log(m)); }
                 }
             }
         }

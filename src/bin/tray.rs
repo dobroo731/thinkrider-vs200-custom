@@ -41,14 +41,14 @@ struct MenuItems {
 }
 
 struct TrayApp {
-    cmd_tx: mpsc::UnboundedSender<BleCommand>,
-    config_tx: watch::Sender<BleConfig>,
+    command_sender: mpsc::UnboundedSender<BleCommand>,
+    config_receiver: watch::Sender<BleConfig>,
     items: MenuItems,
 }
 
 impl TrayApp {
     fn send_notification(&self, body: &str) {
-        if self.config_tx.borrow().notifications_enabled {
+        if self.config_receiver.borrow().notifications_enabled {
             let _ = notify_rust::Notification::new()
                 .summary("Think Rider")
                 .body(body)
@@ -128,15 +128,15 @@ impl ApplicationHandler<UserEvent> for TrayApp {
                 if let Ok(action) = MenuAction::try_from(id) {
                     match action {
                         MenuAction::ToggleNotify => {
-                            let mut current = self.config_tx.borrow().clone();
+                            let mut current = self.config_receiver.borrow().clone();
                             current.notifications_enabled = !current.notifications_enabled;
-                            let _ = self.config_tx.send(current);
+                            let _ = self.config_receiver.send(current);
                         }
                         MenuAction::Search => {
-                            let _ = self.cmd_tx.send(BleCommand::SearchDevice);
+                            let _ = self.command_sender.send(BleCommand::SearchDevice);
                         }
                         MenuAction::StopSearch => {
-                            let _ = self.cmd_tx.send(BleCommand::StopSearch);
+                            let _ = self.command_sender.send(BleCommand::StopSearch);
                         }
                         MenuAction::Quit => {
                             std::process::exit(0);
@@ -213,19 +213,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Use the bootstrapper to initialize BLE subsystem
     let rt = tokio::runtime::Runtime::new()?;
-    let (cmd_tx, mut event_rx, config_tx, config_rx) = rt.block_on(async {
-        BleSystem::new(app_state)
-            .bootstrap(
-                thinkrider_vs200_rs::ThinkRiderVS200,
-                InteractionType::Keyboard,
-            )
-            .await
-    })?;
+    let (command_sender, mut event_receiver, config_sender, config_receiver) =
+        rt.block_on(async {
+            BleSystem::new(app_state)
+                .bootstrap(
+                    thinkrider_vs200_rs::ThinkRiderVS200,
+                    InteractionType::Keyboard,
+                )
+                .await
+        })?;
 
     let proxy_clone = proxy.clone();
     rt.spawn(async move {
         loop {
-            match event_rx.recv().await {
+            match event_receiver.recv().await {
                 Ok(event) => {
                     let _ = proxy_clone.send_event(UserEvent::BleUpdate(event));
                 }
@@ -237,11 +238,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let mut watcher_config_rx = config_rx;
+    let mut watcher_config_receiver = config_receiver;
     let proxy_watcher = proxy.clone();
     rt.spawn(async move {
-        while watcher_config_rx.changed().await.is_ok() {
-            let new_config = watcher_config_rx.borrow().clone();
+        while watcher_config_receiver.changed().await.is_ok() {
+            let new_config = watcher_config_receiver.borrow().clone();
             let _ = proxy_watcher.send_event(UserEvent::ConfigChanged(new_config));
         }
     });
@@ -257,8 +258,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     let mut app = TrayApp {
-        cmd_tx,
-        config_tx,
+        command_sender,
+        config_receiver: config_sender,
         items: tray_menu.items,
     };
 

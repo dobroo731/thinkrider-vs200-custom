@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Bootstrap the entire BLE subsystem (Worker + Interaction Manager)
     let system = BleSystem::new(config.clone());
-    let (cmd_tx, mut event_rx, _config_tx, _config_rx) = system
+    let (command_sender, mut event_receiver, _config_sender, _config_receiver) = system
         .bootstrap(
             thinkrider_vs200_rs::ThinkRiderVS200,
             InteractionType::Keyboard,
@@ -28,12 +28,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .await?;
 
     // Trigger initial search
-    let _ = cmd_tx.send(BleCommand::SearchDevice);
+    let _ = command_sender.send(BleCommand::SearchDevice);
 
     println!("🎧 Listening for events... (Press Ctrl+C to stop)");
 
     loop {
-        match event_rx.recv().await {
+        match event_receiver.recv().await {
             Ok(event) => match event {
                 BleEvent::StatusUpdate(state) => {
                     println!("📡 Status: {}", state);
