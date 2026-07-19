@@ -234,10 +234,10 @@ pub struct KeyboardInteraction {
 
 impl KeyboardInteraction {
     pub fn new(config: &BleConfig) -> BleResult<Self> {
-        let enigo = Enigo::new(&Settings::default()).map_err(|e| {
+        let enigo = Enigo::new(&Settings::default()).map_err(|error| {
             BleError::InteractionError(format!(
                 "Failed to initialize keyboard emulator (Enigo): {}",
-                e
+                error
             ))
         })?;
         Ok(Self {
@@ -563,10 +563,10 @@ enum InternalEvent {
 
 pub struct BleWorker {
     context: Arc<BleContext>,
-    rx_cmd: mpsc::UnboundedReceiver<BleCommand>,
+    command_receiver: mpsc::UnboundedReceiver<BleCommand>,
     adapter: btleplug::platform::Adapter,
-    internal_sender: mpsc::UnboundedSender<InternalEvent>,
-    internal_receiver: mpsc::UnboundedReceiver<InternalEvent>,
+    worker_event_sender: mpsc::UnboundedSender<InternalEvent>,
+    worker_event_receiver: mpsc::UnboundedReceiver<InternalEvent>,
 }
 
 impl BleWorker {
@@ -583,7 +583,7 @@ impl BleWorker {
             .into_iter()
             .next()
             .ok_or(BleError::NoAdapterAvailable)?;
-        let (internal_sender, internal_receiver) = mpsc::unbounded_channel();
+        let (worker_event_sender, worker_event_receiver) = mpsc::unbounded_channel();
         let context = Arc::new(BleContext::new(
             Arc::new(profile),
             event_sender,
@@ -591,63 +591,64 @@ impl BleWorker {
         ));
         Ok(Self {
             context,
-            rx_cmd: command_receiver,
+            command_receiver,
             adapter,
-            internal_sender,
-            internal_receiver,
+            worker_event_sender,
+            worker_event_receiver,
         })
     }
 
     async fn execute_scan(
         adapter: btleplug::platform::Adapter,
         profile: Arc<dyn BleDeviceProfile>,
-        internal_sender: mpsc::UnboundedSender<InternalEvent>,
+        worker_event_sender: mpsc::UnboundedSender<InternalEvent>,
     ) {
-        if let Err(e) = adapter.start_scan(ScanFilter::default()).await {
-            let _ = internal_sender.send(InternalEvent::Log(format!("Scan error: {}", e).into()));
+        if let Err(error) = adapter.start_scan(ScanFilter::default()).await {
+            let _ = worker_event_sender.send(InternalEvent::Log(format!("Scan error: {}", error)));
             return;
         }
 
         let mut events = match adapter.events().await {
             Ok(e) => e,
-            Err(e) => {
-                let _ = internal_sender.send(InternalEvent::Log(
-                    format!("Failed to get adapter events: {}", e).into(),
-                ));
+            Err(error) => {
+                let _ = worker_event_sender.send(InternalEvent::Log(format!(
+                    "Failed to get adapter events: {}",
+                    error
+                )));
                 return;
             }
         };
 
-        let start = std::time::Instant::now();
+        let start_time = std::time::Instant::now();
 
         loop {
             tokio::select! {
                 Some(event) = events.next() => {
-                    if let btleplug::api::CentralEvent::DeviceDiscovered(p_id) = event {
+                    if let btleplug::api::CentralEvent::DeviceDiscovered(peripheral_id) = event {
                         let device = async {
-                            let p = adapter.peripheral(&p_id).await.ok()?;
-                            let props = p.properties().await.ok()??;
-                            if profile.matches(props.local_name.as_deref()) {
-                                Some(BleDevice::new(profile.clone(), p))
+                            let peripheral = adapter.peripheral(&peripheral_id).await.ok()?;
+                            let properties = peripheral.properties().await.ok()??;
+                            if profile.matches(properties.local_name.as_deref()) {
+                                Some(BleDevice::new(profile.clone(), peripheral))
                             } else {
                                 None
                             }
                         }.await;
 
-                        if let Some(d) = device {
-                            let _ = internal_sender.send(InternalEvent::DeviceFound(d));
+                        if let Some(found_device) = device {
+                            let _ = worker_event_sender.send(InternalEvent::DeviceFound(found_device));
                             return;
                         }
                     }
                 }
                 _ = tokio::time::sleep(SCAN_INTERVAL) => {
-                    if start.elapsed() >= SCAN_TIMEOUT {
+                    if start_time.elapsed() >= SCAN_TIMEOUT {
                         break;
                     }
                 }
             }
         }
-        let _ = internal_sender.send(InternalEvent::StatusUpdate(State::Disconnected));
+        let _ = worker_event_sender.send(InternalEvent::StatusUpdate(State::Disconnected));
     }
 
     async fn start_connection_session(&self, device: BleDevice) {
@@ -657,7 +658,7 @@ impl BleWorker {
 
         tokio::spawn(async move {
             let mut retry_count = 0;
-            let mut backoff = INITIAL_BACKOFF;
+            let mut backoff_duration = INITIAL_BACKOFF;
 
             loop {
                 let status = if retry_count > 0 {
@@ -673,16 +674,17 @@ impl BleWorker {
 
                 match context.clone().handle_peripheral(device.clone()).await {
                     Ok(_) => break,
-                    Err(e) => {
-                        let _ = event_sender.send(BleEvent::Log(
-                            format!("Connection lost: {}. Retrying...", e).into(),
-                        ));
+                    Err(error) => {
+                        let _ = event_sender.send(BleEvent::Log(format!(
+                            "Connection lost: {}. Retrying...",
+                            error
+                        )));
                         retry_count += 1;
                         if retry_count > MAX_RECONNECTION_ATTEMPTS {
                             break;
                         }
-                        tokio::time::sleep(backoff).await;
-                        backoff *= 2;
+                        tokio::time::sleep(backoff_duration).await;
+                        backoff_duration *= 2;
                     }
                 }
             }
@@ -692,28 +694,28 @@ impl BleWorker {
 
     pub async fn run(mut self) -> BleResult<()> {
         let mut scan_task: Option<tokio::task::JoinHandle<()>> = None;
-        let mut conn_task: Option<tokio::task::JoinHandle<()>> = None;
+        let mut connection_task: Option<tokio::task::JoinHandle<()>> = None;
 
         loop {
             tokio::select! {
-                Some(cmd) = self.rx_cmd.recv() => {
-                    if let Some(t) = scan_task.take() { t.abort(); }
-                    if let Some(t) = conn_task.take() { t.abort(); }
+                Some(command) = self.command_receiver.recv() => {
+                    if let Some(task) = scan_task.take() { task.abort(); }
+                    if let Some(task) = connection_task.take() { task.abort(); }
 
-                    match cmd {
+                    match command {
                         BleCommand::SearchDevice => {
                             let _ = self.context.event_sender.send(BleEvent::StatusUpdate(State::Searching));
-                            scan_task = Some(tokio::spawn(Self::execute_scan(self.adapter.clone(), self.context.profile.clone(), self.internal_sender.clone())));
+                            scan_task = Some(tokio::spawn(Self::execute_scan(self.adapter.clone(), self.context.profile.clone(), self.worker_event_sender.clone())));
                         }
                         BleCommand::StopSearch => {
                             let _ = self.context.event_sender.send(BleEvent::StatusUpdate(State::Disconnected));
                         }
                     }
                 }
-                Some(ev) = self.internal_receiver.recv() => match ev {
-                    InternalEvent::DeviceFound(d) => self.start_connection_session(d).await,
-                    InternalEvent::StatusUpdate(s) => { let _ = self.context.event_sender.send(BleEvent::StatusUpdate(s)); }
-                    InternalEvent::Log(m) => { let _ = self.context.event_sender.send(BleEvent::Log(m)); }
+                Some(internal_event) = self.worker_event_receiver.recv() => match internal_event {
+                    InternalEvent::DeviceFound(device) => self.start_connection_session(device).await,
+                    InternalEvent::StatusUpdate(status) => { let _ = self.context.event_sender.send(BleEvent::StatusUpdate(status)); }
+                    InternalEvent::Log(message) => { let _ = self.context.event_sender.send(BleEvent::Log(message)); }
                 }
             }
         }
