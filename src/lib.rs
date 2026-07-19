@@ -34,6 +34,7 @@ type BleResult<T> = Result<T, BleError>;
 const SCAN_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_RECONNECTION_ATTEMPTS: u32 = 5;
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+const BATTERY_POLL_INTERVAL: Duration = Duration::from_secs(300);
 
 #[derive(Clone)]
 pub struct DeviceCharacteristics {
@@ -511,7 +512,7 @@ impl BleContext {
         let device_for_poll = device.clone();
         let context_for_poll = self.clone();
         tokio::spawn(async move {
-            let mut poll_interval = tokio::time::interval(Duration::from_secs(300));
+            let mut poll_interval = tokio::time::interval(BATTERY_POLL_INTERVAL);
             loop {
                 poll_interval.tick().await;
                 if context_for_poll
