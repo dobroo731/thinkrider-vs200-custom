@@ -1,5 +1,6 @@
 use std::env;
 use thinkrider_vs200_rs::{BleCommand, BleConfig, BleEvent, BleSystem, InteractionType};
+use tokio::sync::broadcast;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
