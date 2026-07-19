@@ -1,5 +1,7 @@
 use std::env;
-use thinkrider_vs200_rs::{BleCommand, BleConfig, BleEvent, BleSystem, InteractionType};
+use thinkrider_vs200_rs::{
+    BleCommand, BleConfig, BleEvent, BleSystem, BleSystemHandle, InteractionType,
+};
 use tokio::sync::broadcast;
 
 #[tokio::main]
@@ -22,7 +24,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Bootstrap the entire BLE subsystem (Worker + Interaction Manager)
     let system = BleSystem::new(config.clone());
-    let (command_sender, mut event_receiver, _config_sender, _config_receiver) = system
+    let BleSystemHandle {
+        command_sender,
+        event_sender,
+        ..
+    } = system.handle();
+
+    system
         .bootstrap(
             thinkrider_vs200_rs::ThinkRiderVS200,
             InteractionType::Keyboard,
@@ -35,6 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Listening for events... (Press Ctrl+C to stop)");
 
     loop {
+        let mut event_receiver = event_sender.subscribe();
         match event_receiver.recv().await {
             Ok(event) => match event {
                 BleEvent::StatusUpdate(state) => {

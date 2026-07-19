@@ -1,4 +1,6 @@
-use thinkrider_vs200_rs::{BleCommand, BleConfig, BleEvent, BleSystem, InteractionType, State};
+use thinkrider_vs200_rs::{
+    BleCommand, BleConfig, BleEvent, BleSystem, BleSystemHandle, InteractionType, State,
+};
 use tokio::sync::{mpsc, watch};
 use tray_icon::menu::{MenuEvent, MenuId, MenuItem};
 use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
@@ -212,20 +214,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    // Use the bootstrapper to initialize BLE subsystem
-    let rt = tokio::runtime::Runtime::new()?;
-    let (command_sender, mut event_receiver, config_sender, config_receiver) =
-        rt.block_on(async {
-            BleSystem::new(app_state)
-                .bootstrap(
-                    thinkrider_vs200_rs::ThinkRiderVS200,
-                    InteractionType::Keyboard,
-                )
-                .await
-        })?;
+    // 1. Initialize BLE System synchronously (creates channels only)
+    let system = BleSystem::new(app_state);
+    let BleSystemHandle {
+        command_sender,
+        config_sender,
+        config_receiver,
+        event_sender,
+    } = system.handle();
 
+    // 2. Setup Runtime and start BLE in background
+    let rt = tokio::runtime::Runtime::new()?;
+
+    rt.spawn(async move {
+        if let Err(e) = system
+            .bootstrap(
+                thinkrider_vs200_rs::ThinkRiderVS200,
+                InteractionType::Keyboard,
+            )
+            .await
+        {
+            tracing::error!(%e, "Failed to bootstrap BLE system");
+        }
+    });
+
+    // 3. Setup Bridge Tasks immediately
     let proxy_clone = proxy.clone();
     rt.spawn(async move {
+        let mut event_receiver = event_sender.subscribe();
         loop {
             match event_receiver.recv().await {
                 Ok(event) => {

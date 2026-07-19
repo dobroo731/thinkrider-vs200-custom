@@ -367,30 +367,41 @@ impl Default for BleConfig {
     }
 }
 
-/// A helper to encapsulate the standard setup of BLE components.
-pub struct BleSystem {
+/// A handle for interacting with the BLE system from the UI/CLI.
+/// This is fully cloneable and can be passed around freely.
+#[derive(Clone)]
+pub struct BleSystemHandle {
     pub config_sender: watch::Sender<BleConfig>,
     pub config_receiver: watch::Receiver<BleConfig>,
     pub event_sender: broadcast::Sender<BleEvent>,
-    pub event_receiver: broadcast::Receiver<BleEvent>,
     pub command_sender: mpsc::UnboundedSender<BleCommand>,
-    pub command_receiver: mpsc::UnboundedReceiver<BleCommand>,
+}
+
+/// A helper to encapsulate the standard setup of BLE components.
+pub struct BleSystem {
+    handle: BleSystemHandle,
+    command_receiver: mpsc::UnboundedReceiver<BleCommand>,
 }
 
 impl BleSystem {
     pub fn new(initial_config: BleConfig) -> Self {
         let (config_sender, config_receiver) = watch::channel(initial_config);
-        let (event_sender, event_receiver) = broadcast::channel(16);
+        let (event_sender, _) = broadcast::channel(16); // Receiver is created via subscribe()
         let (command_sender, command_receiver) = mpsc::unbounded_channel();
 
         Self {
-            config_sender,
-            config_receiver,
-            event_sender,
-            event_receiver,
-            command_sender,
+            handle: BleSystemHandle {
+                config_sender,
+                config_receiver,
+                event_sender,
+                command_sender,
+            },
             command_receiver,
         }
+    }
+
+    pub fn handle(&self) -> BleSystemHandle {
+        self.handle.clone()
     }
 
     /// Boots the BLE worker and interaction manager as background tasks.
@@ -398,21 +409,14 @@ impl BleSystem {
         self,
         profile: P,
         interaction_type: InteractionType,
-    ) -> BleResult<(
-        mpsc::UnboundedSender<BleCommand>,
-        broadcast::Receiver<BleEvent>,
-        watch::Sender<BleConfig>,
-        watch::Receiver<BleConfig>,
-    )> {
-        let system = self;
-        let config_receiver = system.config_receiver.clone();
+    ) -> BleResult<()> {
+        let handle = self.handle;
 
-        // 1. Spawn Worker
         let worker = BleWorker::new(
             profile,
-            system.config_receiver.clone(),
-            system.event_sender.clone(),
-            system.command_receiver,
+            handle.config_receiver.clone(),
+            handle.event_sender.clone(),
+            self.command_receiver,
         )
         .await?;
 
@@ -425,8 +429,8 @@ impl BleSystem {
         // 2. Spawn Interaction Manager
         let interaction_manager = match interaction_type {
             InteractionType::Keyboard => InteractionManager::new_keyboard(
-                system.event_receiver.resubscribe(),
-                system.config_receiver.clone(),
+                handle.event_sender.subscribe(),
+                handle.config_receiver.clone(),
             )?,
         };
 
@@ -434,12 +438,7 @@ impl BleSystem {
             interaction_manager.run().await;
         });
 
-        Ok((
-            system.command_sender,
-            system.event_receiver,
-            system.config_sender,
-            config_receiver,
-        ))
+        Ok(())
     }
 }
 
