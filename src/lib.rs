@@ -627,7 +627,7 @@ impl BleWorker {
     }
 
     async fn start_connection_session(&self, device: BleDevice) -> tokio::task::JoinHandle<()> {
-        let address: String = device.address().to_string();
+        let address = device.address().to_string();
         let context = self.context.clone();
         let event_sender = context.event_sender.clone();
 
