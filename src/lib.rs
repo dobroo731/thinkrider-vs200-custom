@@ -32,7 +32,6 @@ pub enum BleError {
 type BleResult<T> = Result<T, BleError>;
 
 const SCAN_TIMEOUT: Duration = Duration::from_secs(20);
-const SCAN_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_RECONNECTION_ATTEMPTS: u32 = 5;
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 
@@ -603,36 +602,40 @@ impl BleWorker {
             }
         };
 
-        let start_time = std::time::Instant::now();
-
-        loop {
-            tokio::select! {
-                Some(event) = events.next() => {
-                    if let btleplug::api::CentralEvent::DeviceDiscovered(peripheral_id) = event {
-                        let device = async {
-                            let peripheral = adapter.peripheral(&peripheral_id).await.ok()?;
-                            let properties = peripheral.properties().await.ok()??;
-                            if profile.matches(properties.local_name.as_deref()) {
-                                Some(BleDevice::new(profile.clone(), peripheral))
-                            } else {
-                                None
-                            }
-                        }.await;
-
-                        if let Some(found_device) = device {
-                            let _ = worker_event_sender.send(InternalEvent::DeviceFound(found_device));
-                            return;
+        let scan_future = async {
+            while let Some(event) = events.next().await {
+                if let btleplug::api::CentralEvent::DeviceDiscovered(peripheral_id) = event {
+                    let device = async {
+                        let peripheral = adapter.peripheral(&peripheral_id).await.ok()?;
+                        let properties = peripheral.properties().await.ok()??;
+                        if profile.matches(properties.local_name.as_deref()) {
+                            Some(BleDevice::new(profile.clone(), peripheral))
+                        } else {
+                            None
                         }
-                    }
-                }
-                _ = tokio::time::sleep(SCAN_INTERVAL) => {
-                    if start_time.elapsed() >= SCAN_TIMEOUT {
-                        break;
+                    }.await;
+
+                    if let Some(found_device) = device {
+                        return Ok(found_device);
                     }
                 }
             }
+            Err(BleError::DeviceNotFound)
+        };
+
+        match tokio::time::timeout(SCAN_TIMEOUT, scan_future).await {
+            Ok(Ok(found_device)) => {
+                let _ = worker_event_sender.send(InternalEvent::DeviceFound(found_device));
+            }
+            Ok(Err(e)) => {
+                tracing::debug!(%e, "Scan finished without finding device");
+                let _ = worker_event_sender.send(InternalEvent::StatusUpdate(State::Disconnected));
+            }
+            Err(_) => {
+                tracing::debug!("Scan timed out");
+                let _ = worker_event_sender.send(InternalEvent::StatusUpdate(State::Disconnected));
+            }
         }
-        let _ = worker_event_sender.send(InternalEvent::StatusUpdate(State::Disconnected));
     }
 
     async fn start_connection_session(&self, device: BleDevice) {
