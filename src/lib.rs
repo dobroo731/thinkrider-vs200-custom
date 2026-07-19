@@ -246,28 +246,26 @@ impl KeyboardInteraction {
             down_key: config.down_key,
         })
     }
+
+    async fn simulate_keypress(&mut self, key: Key) -> BleResult<()> {
+        self.enigo
+            .key(key, Direction::Press)
+            .map_err(|error| BleError::InteractionError(error.to_string()))?;
+        self.enigo
+            .key(key, Direction::Release)
+            .map_err(|error| BleError::InteractionError(error.to_string()))?;
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl InteractionHandler for KeyboardInteraction {
     async fn shift_up(&mut self) -> BleResult<()> {
-        self.enigo
-            .key(self.up_key, Direction::Press)
-            .map_err(|e| BleError::InteractionError(e.to_string()))?;
-        self.enigo
-            .key(self.up_key, Direction::Release)
-            .map_err(|e| BleError::InteractionError(e.to_string()))?;
-        Ok(())
+        self.simulate_keypress(self.up_key).await
     }
 
     async fn shift_down(&mut self) -> BleResult<()> {
-        self.enigo
-            .key(self.down_key, Direction::Press)
-            .map_err(|e| BleError::InteractionError(e.to_string()))?;
-        self.enigo
-            .key(self.down_key, Direction::Release)
-            .map_err(|e| BleError::InteractionError(e.to_string()))?;
-        Ok(())
+        self.simulate_keypress(self.down_key).await
     }
 }
 
