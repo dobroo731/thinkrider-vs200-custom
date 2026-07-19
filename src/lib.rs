@@ -112,21 +112,6 @@ impl BleDevice {
         }
     }
 
-    pub async fn find(
-        adapter: &btleplug::platform::Adapter,
-        profile: Arc<dyn BleDeviceProfile>,
-    ) -> BleResult<Self> {
-        let peripherals = adapter.peripherals().await?;
-        for peripheral in peripherals {
-            if let Some(props) = peripheral.properties().await?
-                && profile.matches(props.local_name.as_deref())
-            {
-                return Ok(Self::new(profile, peripheral));
-            }
-        }
-        Err(BleError::DeviceNotFound)
-    }
-
     pub fn address(&self) -> &str {
         &self.address
     }
