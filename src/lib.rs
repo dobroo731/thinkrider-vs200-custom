@@ -520,23 +520,21 @@ impl BleContext {
     async fn handle_peripheral(self: Arc<Self>, mut device: BleDevice) -> BleResult<()> {
         self.setup_device(&mut device).await?;
 
-        loop {
-            tokio::select! {
-                maybe_notification = notifications.next() => {
-                    match maybe_notification {
-                        Some(n) => self.handle_notification(n.uuid, &n.value).await,
-                        None => {
-                            let _ = self.tx_event.send(BleEvent::Log("BLE notification stream closed".into()));
-                            return Err("Notification stream terminated".into());
-                        }
-                    }
-                }
-                _ = battery_poll_interval.tick() => {
-                    self.read_battery_level(peripheral, battery_char).await;
+        let dev_for_poll = device.clone();
+        let ctx_for_poll = self.clone();
+        tokio::spawn(async move {
+            let mut poll = tokio::time::interval(Duration::from_secs(300));
+            loop {
+                poll.tick().await;
+                if ctx_for_poll
+                    .read_battery_level(&dev_for_poll)
+                    .await
+                    .is_err()
+                {
+                    break;
                 }
             }
-        }
-    }
+        });
 
         self.process_notifications(&mut device).await
     }
@@ -655,27 +653,14 @@ impl BleWorker {
                 };
                 let _ = tx_event.send(BleEvent::StatusUpdate(status));
 
-                match ctx.clone().handle_peripheral(peripheral.clone()).await {
-                    Ok(_) => {
-                        let _ = tx_event
-                            .send(BleEvent::Log("Peripheral session ended gracefully".into()));
-                        break;
-                    }
+                match ctx.clone().handle_peripheral(device.clone()).await {
+                    Ok(_) => break,
                     Err(e) => {
                         let _ = tx_event.send(BleEvent::Log(
-                            format!(
-                                "Connection lost: {}. Retrying... ({} / {})",
-                                e,
-                                retry_count + 1,
-                                max_retries
-                            )
-                            .into(),
+                            format!("Connection lost: {}. Retrying...", e).into(),
                         ));
                         retry_count += 1;
-                        if retry_count > max_retries {
-                            let _ = tx_event.send(BleEvent::Log(
-                                "Max reconnection attempts reached. Giving up.".into(),
-                            ));
+                        if retry_count > 5 {
                             break;
                         }
                         tokio::time::sleep(backoff).await;
@@ -689,53 +674,28 @@ impl BleWorker {
 
     pub async fn run(mut self) -> BleResult<()> {
         let mut scan_task: Option<tokio::task::JoinHandle<()>> = None;
-        let mut connection_task: Option<tokio::task::JoinHandle<()>> = None;
-
-        let stop_tasks = |scan: &mut Option<tokio::task::JoinHandle<()>>,
-                          conn: &mut Option<tokio::task::JoinHandle<()>>| {
-            if let Some(t) = scan.take() {
-                t.abort();
-            }
-            if let Some(t) = conn.take() {
-                t.abort();
-            }
-        };
+        let mut conn_task: Option<tokio::task::JoinHandle<()>> = None;
 
         loop {
             tokio::select! {
                 Some(cmd) = self.rx_cmd.recv() => {
+                    if let Some(t) = scan_task.take() { t.abort(); }
+                    if let Some(t) = conn_task.take() { t.abort(); }
+
                     match cmd {
                         BleCommand::SearchDevice => {
-                            stop_tasks(&mut scan_task, &mut connection_task);
-
-                            if self.ctx.rx_config.borrow().notifications_enabled {
-                                let _ = self.ctx.tx_event.send(BleEvent::Log("User triggered 'Search Device'".into()));
-                            }
                             let _ = self.ctx.tx_event.send(BleEvent::StatusUpdate(State::Searching));
-
-                            let adapter = self.adapter.clone();
-                            let internal_tx = self.internal_tx.clone();
-                            scan_task = Some(tokio::spawn(Self::execute_scan(adapter, internal_tx)));
+                            scan_task = Some(tokio::spawn(Self::execute_scan(self.adapter.clone(), self.ctx.profile.clone(), self.internal_tx.clone())));
                         }
                         BleCommand::StopSearch => {
-                            stop_tasks(&mut scan_task, &mut connection_task);
                             let _ = self.ctx.tx_event.send(BleEvent::StatusUpdate(State::Disconnected));
-                            let _ = self.ctx.tx_event.send(BleEvent::Log("Search stopped by user".into()));
                         }
                     }
                 }
-                Some(internal_event) = self.internal_rx.recv() => {
-                    match internal_event {
-                        InternalEvent::DeviceFound(peripheral) => {
-                            self.start_connection_session(peripheral).await;
-                        }
-                        InternalEvent::StatusUpdate(s) => {
-                            let _ = self.ctx.tx_event.send(BleEvent::StatusUpdate(s));
-                        }
-                        InternalEvent::Log(msg) => {
-                            let _ = self.ctx.tx_event.send(BleEvent::Log(msg));
-                        }
-                    }
+                Some(ev) = self.internal_rx.recv() => match ev {
+                    InternalEvent::DeviceFound(d) => self.start_connection_session(d).await,
+                    InternalEvent::StatusUpdate(s) => { let _ = self.ctx.tx_event.send(BleEvent::StatusUpdate(s)); }
+                    InternalEvent::Log(m) => { let _ = self.ctx.tx_event.send(BleEvent::Log(m)); }
                 }
             }
         }
