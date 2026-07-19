@@ -32,6 +32,11 @@ pub enum BleError {
 
 type BleResult<T> = Result<T, BleError>;
 
+const SCAN_TIMEOUT: Duration = Duration::from_secs(20);
+const SCAN_INTERVAL: Duration = Duration::from_millis(100);
+const MAX_RECONNECTION_ATTEMPTS: u32 = 5;
+const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+
 #[derive(Clone)]
 pub struct DeviceCharacteristics {
     pub notify: Characteristic,
@@ -614,7 +619,6 @@ impl BleWorker {
         };
 
         let start = std::time::Instant::now();
-        let total_timeout = Duration::from_secs(20);
 
         loop {
             tokio::select! {
@@ -636,8 +640,8 @@ impl BleWorker {
                         }
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    if start.elapsed() >= total_timeout {
+                _ = tokio::time::sleep(SCAN_INTERVAL) => {
+                    if start.elapsed() >= SCAN_TIMEOUT {
                         break;
                     }
                 }
@@ -653,7 +657,7 @@ impl BleWorker {
 
         tokio::spawn(async move {
             let mut retry_count = 0;
-            let mut backoff = Duration::from_secs(1);
+            let mut backoff = INITIAL_BACKOFF;
 
             loop {
                 let status = if retry_count > 0 {
@@ -674,7 +678,7 @@ impl BleWorker {
                             format!("Connection lost: {}. Retrying...", e).into(),
                         ));
                         retry_count += 1;
-                        if retry_count > 5 {
+                        if retry_count > MAX_RECONNECTION_ATTEMPTS {
                             break;
                         }
                         tokio::time::sleep(backoff).await;
