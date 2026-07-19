@@ -53,7 +53,7 @@ pub trait BleDeviceProfile: Send + Sync {
     /// Maps available characteristics to those required by this profile.
     fn find_characteristics(
         &self,
-        characteristics: &[Characteristic],
+        characteristics: &std::collections::BTreeSet<Characteristic>,
     ) -> Option<DeviceCharacteristics> {
         let mut notify = None;
         let mut battery = None;
@@ -148,15 +148,11 @@ impl BleDevice {
         self.peripheral.connect().await?;
         self.peripheral.discover_services().await?;
 
-        let chars = self.peripheral.characteristics();
-        // Convert BTreeSet to Vec for the trait method
-        let chars_vec: Vec<Characteristic> = chars.into_iter().collect();
-        let device_chars =
-            self.profile
-                .find_characteristics(&chars_vec)
-                .ok_or(BleError::ConnectionFailed(
-                    "Could not find required characteristics for this device".into(),
-                ))?;
+        let device_chars = self.profile
+            .find_characteristics(&self.peripheral.characteristics())
+            .ok_or(BleError::ConnectionFailed(
+                "Could not find required characteristics for this device".into(),
+            ))?;
 
         // Subscribe to notifications
         self.peripheral.subscribe(&device_chars.notify).await?;
