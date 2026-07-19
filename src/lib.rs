@@ -308,15 +308,15 @@ impl InteractionManager {
                                     ShiftDirection::Down => self.handler.shift_down().await,
                                 };
                                 if let Err(error) = result {
-                                    eprintln!("Interaction Error ({}): {}", direction, error);
+                                    tracing::error!(%direction, %error, "Interaction Error");
                                 }
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
-                            eprintln!("Interaction Manager lagged: some events were missed");
+                            tracing::warn!("Interaction Manager lagged: some events were missed");
                         }
                         Err(broadcast::error::RecvError::Closed) => {
-                            eprintln!("Event channel closed; shutting down Interaction Manager");
+                            tracing::info!("Event channel closed; shutting down Interaction Manager");
                             break;
                         }
                     }
@@ -333,9 +333,9 @@ impl InteractionManager {
 pub enum State {
     Disconnected,
     Searching,
-    Connecting { device_address: Cow<'static, str> },
-    Connected { device_address: Cow<'static, str> },
-    Reconnecting { device_address: Cow<'static, str> },
+    Connecting { device_address: String },
+    Connected { device_address: String },
+    Reconnecting { device_address: String },
 }
 
 impl std::fmt::Display for State {
@@ -357,7 +357,6 @@ impl std::fmt::Display for State {
 #[derive(Debug, Clone)]
 pub enum BleEvent {
     StatusUpdate(State),
-    Log(Cow<'static, str>),
     BatteryLevel(u8),
     KeyPress(ShiftDirection),
 }
@@ -438,7 +437,7 @@ impl BleSystem {
 
         tokio::spawn(async move {
             if let Err(error) = worker.run().await {
-                eprintln!("❌ BleWorker critical error: {}", error);
+                tracing::error!(%error, "BleWorker critical error");
             }
         });
 
@@ -494,9 +493,7 @@ impl BleContext {
             }
             Ok(None) => Ok(()),
             Err(error) => {
-                let _ = self.event_sender.send(BleEvent::Log(
-                    format!("Battery read error: {}", error).into(),
-                ));
+                tracing::error!(%error, "Battery read error");
                 Err(error)
             }
         }
@@ -507,9 +504,7 @@ impl BleContext {
             if let BleEvent::KeyPress(direction) = event
                 && self.config_receiver.borrow().debug
             {
-                let _ = self
-                    .event_sender
-                    .send(BleEvent::Log(format!("Pressed: {}", direction).into()));
+                tracing::debug!(%direction, "Pressed");
             }
             let _ = self.event_sender.send(event);
         }
@@ -556,7 +551,6 @@ impl BleContext {
 enum InternalEvent {
     DeviceFound(BleDevice),
     StatusUpdate(State),
-    Log(Cow<'static, str>),
 }
 
 pub struct BleWorker {
@@ -602,17 +596,14 @@ impl BleWorker {
         worker_event_sender: mpsc::UnboundedSender<InternalEvent>,
     ) {
         if let Err(error) = adapter.start_scan(ScanFilter::default()).await {
-            let _ = worker_event_sender.send(InternalEvent::Log(format!("Scan error: {}", error)));
+            tracing::error!(%error, "Scan error");
             return;
         }
 
         let mut events = match adapter.events().await {
             Ok(e) => e,
             Err(error) => {
-                let _ = worker_event_sender.send(InternalEvent::Log(format!(
-                    "Failed to get adapter events: {}",
-                    error
-                )));
+                tracing::error!(%error, "Failed to get adapter events");
                 return;
             }
         };
@@ -650,7 +641,7 @@ impl BleWorker {
     }
 
     async fn start_connection_session(&self, device: BleDevice) {
-        let addr: Cow<'static, str> = Cow::Owned(device.address().to_string());
+        let address: String = device.address().to_string();
         let context = self.context.clone();
         let event_sender = context.event_sender.clone();
 
@@ -661,11 +652,11 @@ impl BleWorker {
             loop {
                 let status = if retry_count > 0 {
                     State::Reconnecting {
-                        device_address: addr.clone(),
+                        device_address: address.clone(),
                     }
                 } else {
                     State::Connected {
-                        device_address: addr.clone(),
+                        device_address: address.clone(),
                     }
                 };
                 let _ = event_sender.send(BleEvent::StatusUpdate(status));
@@ -673,10 +664,7 @@ impl BleWorker {
                 match context.clone().handle_peripheral(device.clone()).await {
                     Ok(_) => break,
                     Err(error) => {
-                        let _ = event_sender.send(BleEvent::Log(format!(
-                            "Connection lost: {}. Retrying...",
-                            error
-                        )));
+                        tracing::warn!(%error, "Connection lost. Retrying...");
                         retry_count += 1;
                         if retry_count > MAX_RECONNECTION_ATTEMPTS {
                             break;
@@ -713,7 +701,6 @@ impl BleWorker {
                 Some(internal_event) = self.worker_event_receiver.recv() => match internal_event {
                     InternalEvent::DeviceFound(device) => self.start_connection_session(device).await,
                     InternalEvent::StatusUpdate(status) => { let _ = self.context.event_sender.send(BleEvent::StatusUpdate(status)); }
-                    InternalEvent::Log(message) => { let _ = self.context.event_sender.send(BleEvent::Log(message)); }
                 }
             }
         }

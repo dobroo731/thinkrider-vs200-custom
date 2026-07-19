@@ -118,7 +118,6 @@ impl ApplicationHandler<UserEvent> for TrayApp {
                 BleEvent::KeyPress(key) => {
                     self.send_notification(&format!("Key Pressed: {}", key));
                 }
-                BleEvent::Log(_msg) => {}
             },
             UserEvent::Tray(_tray_event) => {
                 // Handle tray icon events (e.g., clicks) if needed in the future
@@ -193,6 +192,8 @@ struct TrayMenu {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt::init();
+
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
 
@@ -231,7 +232,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = proxy_clone.send_event(UserEvent::BleUpdate(event));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    eprintln!("⚠️ Tray Bridge lagged");
+                    tracing::warn!("Tray Bridge lagged");
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }

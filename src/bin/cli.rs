@@ -4,6 +4,8 @@ use tokio::sync::broadcast;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tracing_subscriber::fmt::init();
+
     let args: Vec<String> = env::args().collect();
     let mut config = BleConfig::default();
 
@@ -13,9 +15,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
-    println!("🚀 Starting Think Rider CLI...");
+    println!("Starting Think Rider CLI...");
     if config.debug {
-        println!("🛠️ Debug mode enabled");
+        println!("Debug mode enabled");
     }
 
     // Bootstrap the entire BLE subsystem (Worker + Interaction Manager)
@@ -30,32 +32,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Trigger initial search
     let _ = command_sender.send(BleCommand::SearchDevice);
 
-    println!("🎧 Listening for events... (Press Ctrl+C to stop)");
+    println!("Listening for events... (Press Ctrl+C to stop)");
 
     loop {
         match event_receiver.recv().await {
             Ok(event) => match event {
                 BleEvent::StatusUpdate(state) => {
-                    println!("📡 Status: {}", state);
-                }
-                BleEvent::Log(msg) => {
-                    println!("📝 Log: {}", msg);
+                    println!("Status: {}", state);
                 }
                 BleEvent::BatteryLevel(level) => {
-                    println!("🔋 Battery level: {}%", level);
+                    println!("Battery level: {}%", level);
                     if level <= 20 {
-                        println!("⚠️ Low battery warning!");
+                        println!("Low battery warning!");
                     }
                 }
                 BleEvent::KeyPress(key) => {
-                    println!("⌨️ Key Pressed: {}", key);
+                    println!("Key Pressed: {}", key);
                 }
             },
             Err(broadcast::error::RecvError::Lagged(n)) => {
-                eprintln!("⚠️  Warning: receiver lagged, missed {} messages", n);
+                tracing::warn!(lagged_messages = n, "Receiver lagged");
             }
             Err(broadcast::error::RecvError::Closed) => {
-                eprintln!("❌ Event channel closed. Exiting...");
+                tracing::error!("Event channel closed. Exiting...");
                 break;
             }
         }
