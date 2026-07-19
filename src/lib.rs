@@ -270,20 +270,20 @@ impl InteractionHandler for KeyboardInteraction {
 }
 
 pub struct InteractionManager {
-    event_rx: broadcast::Receiver<BleEvent>,
-    config_rx: watch::Receiver<BleConfig>,
+    event_receiver: broadcast::Receiver<BleEvent>,
+    config_receiver: watch::Receiver<BleConfig>,
     handler: Box<dyn InteractionHandler>,
 }
 
 impl InteractionManager {
     pub fn new(
-        event_rx: broadcast::Receiver<BleEvent>,
-        config_rx: watch::Receiver<BleConfig>,
+        event_receiver: broadcast::Receiver<BleEvent>,
+        config_receiver: watch::Receiver<BleConfig>,
         handler: Box<dyn InteractionHandler>,
     ) -> Self {
         Self {
-            event_rx,
-            config_rx,
+            event_receiver,
+            config_receiver,
             handler,
         }
     }
@@ -299,26 +299,17 @@ impl InteractionManager {
     pub async fn run(mut self) {
         loop {
             tokio::select! {
-                Ok(event) = self.event_rx.recv() => {
+                Ok(event) = self.event_receiver.recv() => {
                     if let BleEvent::KeyPress(direction) = event {
-                        let res = match direction {
+                        let result = match direction {
                             ShiftDirection::Up => self.handler.shift_up().await,
                             ShiftDirection::Down => self.handler.shift_down().await,
                         };
-                        if let Err(e) = res {
-                            eprintln!("Interaction Error ({}): {}", direction, e);
-                        }
+                        if let Err(error) = result { eprintln!("Interaction Error ({}): {}", direction, error); }
                     }
                 }
-                Ok(_) = self.config_rx.changed() => {
-                    let config = self.config_rx.borrow();
-                        match KeyboardInteraction::new(&config) {
-                            Ok(new_handler) => {
-                                self.handler = Box::new(new_handler);
-                                eprintln!("⚙️  Interaction handler recreated due to keymapping change");
-                            }
-                            Err(e) => eprintln!("❌ Failed to recreate interaction handler: {}", e),
-                    }
+                Ok(_) = self.config_receiver.changed() => {
+                    // TODO: recreate handler when more handlers exists
                 }
             }
         }

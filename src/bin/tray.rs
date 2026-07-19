@@ -46,11 +46,6 @@ struct TrayApp {
     items: MenuItems,
 }
 
-struct TrayMenu {
-    menu: tray_icon::menu::Menu,
-    items: MenuItems,
-}
-
 impl TrayApp {
     fn send_notification(&self, body: &str) {
         if self.config_tx.borrow().notifications_enabled {
@@ -192,11 +187,15 @@ impl TrayMenu {
     }
 }
 
-fn main() {
-    let event_loop = EventLoop::<UserEvent>::with_user_event().build().unwrap();
+struct TrayMenu {
+    menu: tray_icon::menu::Menu,
+    items: MenuItems,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
 
-    // Set up tray and menu handlers to forward events to the winit event loop
     let proxy_tray = proxy.clone();
     TrayIconEvent::set_event_handler(Some(move |event| {
         let _ = proxy_tray.send_event(UserEvent::Tray(event));
