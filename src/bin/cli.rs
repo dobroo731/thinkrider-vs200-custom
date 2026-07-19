@@ -1,6 +1,5 @@
 use std::env;
-use thinkrider_vs200_rs::{BleCommand, BleConfig, BleEvent, BleWorker};
-use tokio::sync::{broadcast, mpsc, watch};
+use thinkrider_vs200_rs::{BleCommand, BleConfig, BleEvent, BleSystem, InteractionType};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -18,34 +17,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("🛠️ Debug mode enabled");
     }
 
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = broadcast::channel(16);
-    let (_config_tx, config_rx) = watch::channel(config);
-
-    // Initialize the interaction manager with default keyboard behavior.
-    let manager = thinkrider_vs200_rs::InteractionManager::new_keyboard(
-        event_tx.subscribe(),
-        config_rx.clone(),
-    )?;
-    tokio::spawn(async move {
-        manager.run().await;
-    });
-
-    let worker_config_rx = config_rx.clone();
-    let event_tx_clone = event_tx.clone();
-    tokio::spawn(async move {
-        let worker = match BleWorker::new(worker_config_rx, event_tx_clone, cmd_rx).await {
-            Ok(w) => w,
-            Err(e) => {
-                eprintln!("❌ Failed to initialize BLE Worker: {}", e);
-                return;
-            }
-        };
-
-        if let Err(e) = worker.run().await {
-            eprintln!("❌ BLE Worker Error: {}", e);
-        }
-    });
+    // Bootstrap the entire BLE subsystem (Worker + Interaction Manager)
+    let system = BleSystem::new(config.clone());
+    let (cmd_tx, mut event_rx, _config_tx, _config_rx) = system
+        .bootstrap(
+            thinkrider_vs200_rs::ThinkRiderVS200,
+            InteractionType::Keyboard,
+        )
+        .await?;
 
     // Trigger initial search
     let _ = cmd_tx.send(BleCommand::SearchDevice);
@@ -59,9 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     println!("📡 Status: {}", state);
                 }
                 BleEvent::Log(msg) => {
-                    if config_rx.borrow().debug {
-                        println!("📝 Log: {}", msg);
-                    }
+                    println!("📝 Log: {}", msg);
                 }
                 BleEvent::BatteryLevel(level) => {
                     println!("🔋 Battery level: {}%", level);

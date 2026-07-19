@@ -1,5 +1,5 @@
-use thinkrider_vs200_rs::{BleCommand, BleConfig, BleEvent, BleWorker, State};
-use tokio::sync::{broadcast, mpsc, watch};
+use thinkrider_vs200_rs::{BleCommand, BleConfig, BleEvent, BleSystem, InteractionType, State};
+use tokio::sync::{mpsc, watch};
 use tray_icon::menu::{MenuEvent, MenuId, MenuItem};
 use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
 use winit::{
@@ -211,70 +211,33 @@ fn main() {
         notifications_enabled: true,
         ..Default::default()
     };
-    let (config_tx, config_rx) = watch::channel(app_state);
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = broadcast::channel(16);
 
-    // Initialize the interaction manager with default keyboard behavior.
-    let manager = match thinkrider_vs200_rs::InteractionManager::new_keyboard(
-        event_tx.subscribe(),
-        config_rx.clone(),
-    ) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("❌ Failed to initialize Interaction Manager: {}", e);
-            std::process::exit(1);
-        }
-    };
+    // Use the bootstrapper to initialize BLE subsystem
+    let rt = tokio::runtime::Runtime::new()?;
+    let (cmd_tx, mut event_rx, config_tx, config_rx) = rt.block_on(async {
+        BleSystem::new(app_state)
+            .bootstrap(
+                thinkrider_vs200_rs::ThinkRiderVS200,
+                InteractionType::Keyboard,
+            )
+            .await
+    })?;
 
-    // Initialize the Tokio runtime first.
-    // We do this manually instead of using #[tokio::main] so that the main thread
-    // remains available for the Winit event loop.
-    let rt = tokio::runtime::Runtime::new().unwrap();
-
-    rt.spawn(async move {
-        manager.run().await;
-    });
-
-    let mut bridge_event_rx = event_tx.subscribe();
-
-    // The Bridge Task: Listens to the BLE worker's broadcast events and
-    // forwards them directly to the winit loop via the proxy.
     let proxy_clone = proxy.clone();
     rt.spawn(async move {
         loop {
-            match bridge_event_rx.recv().await {
+            match event_rx.recv().await {
                 Ok(event) => {
                     let _ = proxy_clone.send_event(UserEvent::BleUpdate(event));
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    eprintln!("⚠️  Tray Bridge lagged");
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    eprintln!("⚠️ Tray Bridge lagged");
                 }
-                Err(broadcast::error::RecvError::Closed) => {
-                    break;
-                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
 
-    // Spawn the BLE worker on the same runtime.
-    let worker_config_rx = config_rx.clone();
-    let event_tx_clone = event_tx.clone();
-    rt.spawn(async move {
-        let worker = match BleWorker::new(worker_config_rx, event_tx_clone, cmd_rx).await {
-            Ok(w) => w,
-            Err(e) => {
-                eprintln!("❌ Failed to initialize BLE Worker: {}", e);
-                return;
-            }
-        };
-
-        if let Err(e) = worker.run().await {
-            eprintln!("BLE worker error: {}", e);
-        }
-    });
-
-    // Spawn the Config Watcher Task: Listens for config changes and updates the UI.
     let mut watcher_config_rx = config_rx;
     let proxy_watcher = proxy.clone();
     rt.spawn(async move {
@@ -285,16 +248,14 @@ fn main() {
     });
 
     let icon_data = vec![255u8; 32 * 32 * 4];
-    let icon = Icon::from_rgba(icon_data, 32, 32).expect("Failed to create icon");
-
-    let tray_menu = TrayMenu::new().expect("Failed to initialize tray menu");
+    let icon = Icon::from_rgba(icon_data, 32, 32)?;
+    let tray_menu = TrayMenu::new()?;
 
     TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu.menu))
         .with_tooltip("Think Rider")
         .with_icon(icon)
-        .build()
-        .expect("Could not initiate tray icon");
+        .build()?;
 
     let mut app = TrayApp {
         cmd_tx,
@@ -302,6 +263,7 @@ fn main() {
         items: tray_menu.items,
     };
 
-    // Final check for file locks    // this will block the main thread as required by winit.
-    event_loop.run_app(&mut app).unwrap();
+    event_loop.run_app(&mut app)?;
+
+    Ok(())
 }
