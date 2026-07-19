@@ -131,7 +131,8 @@ impl BleDevice {
         self.peripheral.connect().await?;
         self.peripheral.discover_services().await?;
 
-        let device_chars = self.profile
+        let device_chars = self
+            .profile
             .find_characteristics(&self.peripheral.characteristics())
             .ok_or(BleError::ConnectionFailed(
                 "Could not find required characteristics for this device".into(),
@@ -598,7 +599,8 @@ impl BleWorker {
                         } else {
                             None
                         }
-                    }.await;
+                    }
+                    .await;
 
                     if let Some(found_device) = device {
                         return Ok(found_device);
