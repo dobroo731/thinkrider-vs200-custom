@@ -623,7 +623,7 @@ impl BleWorker {
         }
     }
 
-    async fn start_connection_session(&self, device: BleDevice) {
+    async fn start_connection_session(&self, device: BleDevice) -> tokio::task::JoinHandle<()> {
         let address: String = device.address().to_string();
         let context = self.context.clone();
         let event_sender = context.event_sender.clone();
@@ -658,7 +658,7 @@ impl BleWorker {
                 }
             }
             let _ = event_sender.send(BleEvent::StatusUpdate(State::Disconnected));
-        });
+        })
     }
 
     pub async fn run(mut self) -> BleResult<()> {
@@ -682,8 +682,12 @@ impl BleWorker {
                     }
                 }
                 Some(internal_event) = self.worker_event_receiver.recv() => match internal_event {
-                    InternalEvent::DeviceFound(device) => self.start_connection_session(device).await,
-                    InternalEvent::StatusUpdate(status) => { let _ = self.context.event_sender.send(BleEvent::StatusUpdate(status)); }
+                    InternalEvent::DeviceFound(device) => {
+                        connection_task = Some(self.start_connection_session(device).await);
+                    }
+                    InternalEvent::StatusUpdate(status) => {
+                        let _ = self.context.event_sender.send(BleEvent::StatusUpdate(status));
+                    }
                 }
             }
         }
