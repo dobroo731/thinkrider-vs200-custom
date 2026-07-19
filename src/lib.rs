@@ -1,13 +1,36 @@
 use async_trait::async_trait;
-use btleplug::api::{Central, Manager, Peripheral, ScanFilter};
+use btleplug::api::{Central, Characteristic, Manager, Peripheral, ScanFilter, ValueNotification};
 use btleplug::platform::{Manager as PlatformManager, Peripheral as PlatformPeripheral};
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use futures::stream::StreamExt;
 use std::borrow::Cow;
-use std::error::Error;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, watch};
 use uuid::Uuid;
+
+#[derive(thiserror::Error, Debug)]
+pub enum BleError {
+    #[error("BLE Adapter Error: {0}")]
+    AdapterError(#[from] btleplug::Error),
+
+    #[error("Interaction Error: {0}")]
+    InteractionError(String),
+
+    #[error("Target BLE device not found")]
+    DeviceNotFound,
+
+    #[error("Connection failed: {0}")]
+    ConnectionFailed(String),
+
+    #[error("No BLE adapter available on this system")]
+    NoAdapterAvailable,
+
+    #[error("Generic error: {0}")]
+    Generic(#[from] Box<dyn std::error::Error + Send + Sync>),
+}
+
+type BleResult<T> = Result<T, BleError>;
 
 #[derive(Clone)]
 pub struct DeviceCharacteristics {
@@ -197,8 +220,8 @@ pub enum ShiftDirection {
 
 #[async_trait]
 pub trait InteractionHandler: Send + Sync {
-    async fn shift_up(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
-    async fn shift_down(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    async fn shift_up(&mut self) -> BleResult<()>;
+    async fn shift_down(&mut self) -> BleResult<()>;
 }
 
 pub struct KeyboardInteraction {
@@ -208,9 +231,13 @@ pub struct KeyboardInteraction {
 }
 
 impl KeyboardInteraction {
-    pub fn new(config: &BleConfig) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let enigo = Enigo::new(&Settings::default())
-            .map_err(|e| format!("Failed to initialize keyboard emulator (Enigo): {}", e))?;
+    pub fn new(config: &BleConfig) -> BleResult<Self> {
+        let enigo = Enigo::new(&Settings::default()).map_err(|e| {
+            BleError::InteractionError(format!(
+                "Failed to initialize keyboard emulator (Enigo): {}",
+                e
+            ))
+        })?;
         Ok(Self {
             enigo,
             up_key: config.up_key,
@@ -221,15 +248,23 @@ impl KeyboardInteraction {
 
 #[async_trait]
 impl InteractionHandler for KeyboardInteraction {
-    async fn shift_up(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.enigo.key(self.up_key, Direction::Press)?;
-        self.enigo.key(self.up_key, Direction::Release)?;
+    async fn shift_up(&mut self) -> BleResult<()> {
+        self.enigo
+            .key(self.up_key, Direction::Press)
+            .map_err(|e| BleError::InteractionError(e.to_string()))?;
+        self.enigo
+            .key(self.up_key, Direction::Release)
+            .map_err(|e| BleError::InteractionError(e.to_string()))?;
         Ok(())
     }
 
-    async fn shift_down(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.enigo.key(self.down_key, Direction::Press)?;
-        self.enigo.key(self.down_key, Direction::Release)?;
+    async fn shift_down(&mut self) -> BleResult<()> {
+        self.enigo
+            .key(self.down_key, Direction::Press)
+            .map_err(|e| BleError::InteractionError(e.to_string()))?;
+        self.enigo
+            .key(self.down_key, Direction::Release)
+            .map_err(|e| BleError::InteractionError(e.to_string()))?;
         Ok(())
     }
 }
@@ -254,15 +289,11 @@ impl InteractionManager {
     }
 
     pub fn new_keyboard(
-        event_rx: broadcast::Receiver<BleEvent>,
-        config_rx: watch::Receiver<BleConfig>,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let handler = {
-            let config = config_rx.borrow();
-            Box::new(KeyboardInteraction::new(&config)?)
-        };
-
-        Ok(Self::new(event_rx, config_rx, handler))
+        event_receiver: broadcast::Receiver<BleEvent>,
+        config_receiver: watch::Receiver<BleConfig>,
+    ) -> BleResult<Self> {
+        let handler = Box::new(KeyboardInteraction::new(&config_receiver.borrow())?);
+        Ok(Self::new(event_receiver, config_receiver, handler))
     }
 
     pub async fn run(mut self) {
@@ -585,7 +616,7 @@ impl BleWorker {
         });
     }
 
-    pub async fn run(mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+    pub async fn run(mut self) -> BleResult<()> {
         let mut scan_task: Option<tokio::task::JoinHandle<()>> = None;
         let mut connection_task: Option<tokio::task::JoinHandle<()>> = None;
 
