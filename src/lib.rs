@@ -3,7 +3,6 @@ use btleplug::api::{Central, Characteristic, Manager, Peripheral, ScanFilter, Va
 use btleplug::platform::{Manager as PlatformManager, Peripheral as PlatformPeripheral};
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use futures::stream::StreamExt;
-use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, watch};
@@ -99,7 +98,7 @@ pub trait BleDeviceProfile: Send + Sync {
 pub struct BleDevice {
     profile: Arc<dyn BleDeviceProfile>,
     peripheral: PlatformPeripheral,
-    address: Cow<'static, str>,
+    address: String,
     battery: Option<Characteristic>,
 }
 
@@ -107,7 +106,7 @@ impl BleDevice {
     pub fn new(profile: Arc<dyn BleDeviceProfile>, peripheral: PlatformPeripheral) -> Self {
         let address = peripheral.address().to_string();
         Self {
-            address: Cow::Owned(address),
+            address,
             profile,
             peripheral,
             battery: None,
