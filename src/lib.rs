@@ -129,8 +129,13 @@ impl BleDevice {
     }
 
     pub async fn connect_and_subscribe(&mut self) -> BleResult<()> {
+        tracing::debug!(address = %self.address, "Connecting to peripheral");
         self.peripheral.connect().await?;
+        tracing::debug!(address = %self.address, "Connected successfully");
+
+        tracing::debug!(address = %self.address, "Discovering services");
         self.peripheral.discover_services().await?;
+        tracing::debug!(address = %self.address, "Services discovered");
 
         let device_chars = self
             .profile
@@ -139,8 +144,9 @@ impl BleDevice {
                 "Could not find required characteristics for this device".into(),
             ))?;
 
-        // Subscribe to notifications
+        tracing::debug!(address = %self.address, "Subscribing to notification characteristic");
         self.peripheral.subscribe(&device_chars.notify).await?;
+        tracing::debug!(address = %self.address, "Notification subscription successful");
 
         // Optional battery subscription/storage
         if let Some(battery_characteristic) = device_chars.battery
@@ -150,6 +156,7 @@ impl BleDevice {
                 .await
                 .is_ok()
         {
+            tracing::debug!(address = %self.address, "Battery subscription successful");
             self.battery = Some(battery_characteristic);
         }
 
@@ -573,6 +580,7 @@ impl BleWorker {
         profile: Arc<dyn BleDeviceProfile>,
         worker_event_sender: mpsc::UnboundedSender<InternalEvent>,
     ) {
+        tracing::debug!("Starting BLE scan");
         if let Err(error) = adapter.start_scan(ScanFilter::default()).await {
             tracing::error!(%error, "Scan error");
             return;
@@ -596,8 +604,12 @@ impl BleWorker {
                         continue;
                     };
 
-                    if profile.matches(properties.local_name.as_deref()) {
-                        return Ok(BleDevice::new(profile.clone(), peripheral));
+                    if let Some(name) = properties.local_name {
+                        tracing::debug!(device_name = %name, "Discovered BLE device");
+                        if profile.matches(Some(&name)) {
+                            tracing::info!(device_name = %name, "Found target device matching profile!");
+                            return Ok(BleDevice::new(profile.clone(), peripheral));
+                        }
                     }
                 }
             }
@@ -606,6 +618,7 @@ impl BleWorker {
 
         match tokio::time::timeout(SCAN_TIMEOUT, scan_future).await {
             Ok(Ok(found_device)) => {
+                tracing::debug!(address = %found_device.address(), "Scan successful: sending device to worker");
                 let _ = worker_event_sender.send(InternalEvent::DeviceFound(found_device));
             }
             Ok(Err(e)) => {
@@ -613,7 +626,7 @@ impl BleWorker {
                 let _ = worker_event_sender.send(InternalEvent::StatusUpdate(State::Disconnected));
             }
             Err(_) => {
-                tracing::debug!("Scan timed out");
+                tracing::debug!(timeout = ?SCAN_TIMEOUT, "Scan timed");
                 let _ = worker_event_sender.send(InternalEvent::StatusUpdate(State::Disconnected));
             }
         }
