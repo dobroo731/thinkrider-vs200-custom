@@ -6,7 +6,10 @@ use tokio::sync::broadcast;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::FmtSubscriber::builder()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_ansi_sanitization(false)
+        .init();
 
     let args: Vec<String> = env::args().collect();
     let mut config = BleConfig::default();
