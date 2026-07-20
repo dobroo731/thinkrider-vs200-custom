@@ -434,9 +434,7 @@ impl BleSystem {
             )?,
         };
 
-        tokio::spawn(async move {
-            interaction_manager.run().await;
-        });
+        tokio::spawn(interaction_manager.run());
 
         Ok(())
     }
