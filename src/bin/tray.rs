@@ -280,6 +280,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         items: tray_menu.items,
     };
 
+    // Trigger auto-search on startup to initiate connection process immediately
+    let _ = app.command_sender.send(BleCommand::SearchDevice);
+
     event_loop.run_app(&mut app)?;
     drop(tray_icon);
 
