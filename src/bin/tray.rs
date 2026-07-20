@@ -44,13 +44,13 @@ struct MenuItems {
 
 struct TrayApp {
     command_sender: mpsc::UnboundedSender<BleCommand>,
-    config_receiver: watch::Sender<BleConfig>,
+    config_sender: watch::Sender<BleConfig>,
     items: MenuItems,
 }
 
 impl TrayApp {
     fn send_notification(&self, body: &str) {
-        if self.config_receiver.borrow().notifications_enabled {
+        if self.config_sender.borrow().notifications_enabled {
             let _ = notify_rust::Notification::new()
                 .summary("Think Rider")
                 .body(body)
@@ -129,9 +129,9 @@ impl ApplicationHandler<UserEvent> for TrayApp {
                 if let Ok(action) = MenuAction::try_from(id) {
                     match action {
                         MenuAction::ToggleNotify => {
-                            let mut current = self.config_receiver.borrow().clone();
+                            let mut current = self.config_sender.borrow().clone();
                             current.notifications_enabled = !current.notifications_enabled;
-                            let _ = self.config_receiver.send(current);
+                            let _ = self.config_sender.send(current);
                         }
                         MenuAction::Search => {
                             let _ = self.command_sender.send(BleCommand::SearchDevice);
@@ -276,7 +276,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut app = TrayApp {
         command_sender,
-        config_receiver: config_sender,
+        config_sender,
         items: tray_menu.items,
     };
 
