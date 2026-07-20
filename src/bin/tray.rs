@@ -268,7 +268,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let icon = Icon::from_rgba(icon_data, 32, 32)?;
     let tray_menu = TrayMenu::new()?;
 
-    TrayIconBuilder::new()
+    let tray_icon = TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu.menu))
         .with_tooltip("Think Rider")
         .with_icon(icon)
@@ -281,6 +281,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     event_loop.run_app(&mut app)?;
+    drop(tray_icon);
 
     Ok(())
 }
