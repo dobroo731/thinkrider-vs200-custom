@@ -83,9 +83,6 @@ impl ApplicationHandler<UserEvent> for TrayApp {
                         State::Connected { device_address } => {
                             format!("Status: Connected ({})", device_address)
                         }
-                        State::Reconnecting { device_address } => {
-                            format!("Status: Reconnecting to {}...", device_address)
-                        }
                     };
                     self.items.status.set_text(status_text);
                     self.items
