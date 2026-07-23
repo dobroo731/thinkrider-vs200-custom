@@ -221,7 +221,7 @@ pub struct KeyboardInteraction {
 }
 
 impl KeyboardInteraction {
-    pub fn new(config: &BleConfig) -> BleResult<Self> {
+    pub fn new() -> BleResult<Self> {
         let enigo = Enigo::new(&Settings::default()).map_err(|error| {
             BleError::InteractionError(format!(
                 "Failed to initialize keyboard emulator (Enigo): {}",
@@ -230,8 +230,8 @@ impl KeyboardInteraction {
         })?;
         Ok(Self {
             enigo,
-            up_key: config.up_key,
-            down_key: config.down_key,
+            up_key: Key::K,
+            down_key: Key::I,
         })
     }
 
@@ -257,21 +257,15 @@ impl InteractionHandler for KeyboardInteraction {
     }
 }
 
-pub struct InteractionManager {
+pub struct InteractionManager<T: InteractionHandler> {
     event_receiver: broadcast::Receiver<BleEvent>,
-    config_receiver: watch::Receiver<BleConfig>,
-    handler: Box<dyn InteractionHandler>,
+    handler: T,
 }
 
-impl InteractionManager {
-    pub fn new(
-        event_receiver: broadcast::Receiver<BleEvent>,
-        config_receiver: watch::Receiver<BleConfig>,
-        handler: Box<dyn InteractionHandler>,
-    ) -> Self {
+impl<T: InteractionHandler> InteractionManager<T> {
+    fn new(event_receiver: broadcast::Receiver<BleEvent>, handler: T) -> Self {
         Self {
             event_receiver,
-            config_receiver,
             handler,
         }
     }
@@ -308,9 +302,6 @@ impl InteractionManager {
                             break;
                         }
                     }
-                }
-                Ok(_) = self.config_receiver.changed() => {
-                    // TODO: recreate handler when more handlers exists
                 }
             }
         }
@@ -355,31 +346,10 @@ pub enum BleCommand {
     StopSearch,
 }
 
-#[derive(Debug, Clone)]
-pub struct BleConfig {
-    pub up_key: Key,
-    pub down_key: Key,
-    pub debug: bool,
-    pub notifications_enabled: bool,
-}
-
-impl Default for BleConfig {
-    fn default() -> Self {
-        Self {
-            up_key: Key::K,
-            down_key: Key::I,
-            debug: false,
-            notifications_enabled: true,
-        }
-    }
-}
-
 /// A handle for interacting with the BLE system from the UI/CLI.
 /// This is fully cloneable and can be passed around freely.
 #[derive(Clone)]
 pub struct BleSystemHandle {
-    pub config_sender: watch::Sender<BleConfig>,
-    pub config_receiver: watch::Receiver<BleConfig>,
     pub event_sender: broadcast::Sender<BleEvent>,
     pub command_sender: mpsc::UnboundedSender<BleCommand>,
 }
@@ -391,31 +361,15 @@ pub struct BleSystem {
 }
 
 impl BleSystem {
-    pub fn new(initial_config: BleConfig) -> Self {
-        let (config_sender, config_receiver) = watch::channel(initial_config);
-        let (event_sender, _) = broadcast::channel(16); // Receiver is created via subscribe()
-        let (command_sender, command_receiver) = mpsc::unbounded_channel();
-
-        Self {
-            handle: BleSystemHandle {
-                config_sender,
-                config_receiver,
-                event_sender,
-                command_sender,
-            },
-            command_receiver,
-        }
-    }
-
     pub fn handle(&self) -> BleSystemHandle {
         self.handle.clone()
     }
 
     /// Boots the BLE worker and interaction manager as background tasks.
     pub async fn bootstrap<P: BleDeviceProfile + 'static>(
-        self,
+        mut self,
         profile: P,
-        interaction_type: InteractionType,
+        handler: impl InteractionHandler + 'static,
     ) -> BleResult<()> {
         let handle = self.handle;
 
@@ -434,12 +388,7 @@ impl BleSystem {
         });
 
         // 2. Spawn Interaction Manager
-        let interaction_manager = match interaction_type {
-            InteractionType::Keyboard => InteractionManager::new_keyboard(
-                handle.event_sender.subscribe(),
-                handle.config_receiver.clone(),
-            )?,
-        };
+        let interaction_manager = InteractionManager::new(handle.event_sender.subscribe(), handler);
 
         tokio::spawn(interaction_manager.run());
 
@@ -447,26 +396,32 @@ impl BleSystem {
     }
 }
 
-pub enum InteractionType {
-    Keyboard,
+impl Default for BleSystem {
+    fn default() -> Self {
+        let (event_sender, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY); // Receiver is created via subscribe()
+        let (command_sender, command_receiver) = mpsc::unbounded_channel();
+
+        Self {
+            handle: BleSystemHandle {
+                event_sender,
+                command_sender,
+            },
+            command_receiver: Some(command_receiver),
+            shutdown_token: CancellationToken::new(),
+        }
+    }
 }
 
 pub struct BleContext {
     profile: Arc<dyn BleDeviceProfile>,
     event_sender: broadcast::Sender<BleEvent>,
-    config_receiver: watch::Receiver<BleConfig>,
 }
 
 impl BleContext {
-    fn new(
-        profile: Arc<dyn BleDeviceProfile>,
-        event_sender: broadcast::Sender<BleEvent>,
-        config_receiver: watch::Receiver<BleConfig>,
-    ) -> Self {
+    fn new(profile: Arc<dyn BleDeviceProfile>, event_sender: broadcast::Sender<BleEvent>) -> Self {
         Self {
             profile,
             event_sender,
-            config_receiver,
         }
     }
 
@@ -486,9 +441,7 @@ impl BleContext {
 
     fn handle_notification(&self, device: &BleDevice, uuid: Uuid, value: &[u8]) {
         if let Some(event) = device.parse_notification(uuid, value) {
-            if let BleEvent::KeyPress(direction) = event
-                && self.config_receiver.borrow().debug
-            {
+            if let BleEvent::KeyPress(direction) = event {
                 tracing::debug!(%direction, "Pressed");
             }
             let _ = self.event_sender.send(event);
@@ -549,7 +502,6 @@ pub struct BleWorker {
 impl BleWorker {
     pub async fn new<P: BleDeviceProfile + 'static>(
         profile: P,
-        config_receiver: watch::Receiver<BleConfig>,
         event_sender: broadcast::Sender<BleEvent>,
         command_receiver: mpsc::UnboundedReceiver<BleCommand>,
     ) -> BleResult<Self> {
@@ -561,11 +513,7 @@ impl BleWorker {
             .next()
             .ok_or(BleError::NoAdapterAvailable)?;
         let (worker_event_sender, worker_event_receiver) = mpsc::unbounded_channel();
-        let context = Arc::new(BleContext::new(
-            Arc::new(profile),
-            event_sender,
-            config_receiver,
-        ));
+        let context = Arc::new(BleContext::new(Arc::new(profile), event_sender));
         Ok(Self {
             context,
             command_receiver,

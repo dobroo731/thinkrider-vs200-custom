@@ -1,7 +1,4 @@
-use std::env;
-use thinkrider_vs200_rs::{
-    BleCommand, BleConfig, BleEvent, BleSystem, BleSystemHandle, InteractionType,
-};
+use thinkrider_vs200_rs::{BleCommand, BleEvent, BleSystem, BleSystemHandle};
 use tokio::sync::broadcast;
 
 #[tokio::main]
@@ -11,22 +8,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_ansi_sanitization(false)
         .init();
 
-    let args: Vec<String> = env::args().collect();
-    let mut config = BleConfig::default();
-
-    for arg in &args {
-        if arg.to_lowercase() == "debug" {
-            config.debug = true;
-        }
-    }
-
     println!("Starting Think Rider CLI...");
-    if config.debug {
-        println!("Debug mode enabled");
-    }
 
     // Bootstrap the entire BLE subsystem (Worker + Interaction Manager)
-    let system = BleSystem::new(config.clone());
+    let system = BleSystem::default();
     let BleSystemHandle {
         command_sender,
         event_sender,
@@ -36,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     system
         .bootstrap(
             thinkrider_vs200_rs::ThinkRiderVS200,
-            InteractionType::Keyboard,
+            thinkrider_vs200_rs::KeyboardInteraction::new()?,
         )
         .await?;
 

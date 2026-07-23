@@ -1,7 +1,5 @@
-use thinkrider_vs200_rs::{
-    BleCommand, BleConfig, BleEvent, BleSystem, BleSystemHandle, InteractionType, State,
-};
-use tokio::sync::{mpsc, watch};
+use thinkrider_vs200_rs::{BleCommand, BleEvent, BleSystem, BleSystemHandle, State};
+use tokio::sync::mpsc;
 use tray_icon::menu::{MenuEvent, MenuId, MenuItem};
 use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
 use winit::{
@@ -13,7 +11,6 @@ enum UserEvent {
     BleUpdate(BleEvent),
     Tray(TrayIconEvent),
     Menu(MenuEvent),
-    ConfigChanged(BleConfig),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display, strum::EnumString, strum::EnumIter)]
@@ -44,13 +41,13 @@ struct MenuItems {
 
 struct TrayApp {
     command_sender: mpsc::UnboundedSender<BleCommand>,
-    config_sender: watch::Sender<BleConfig>,
     items: MenuItems,
+    notify: bool,
 }
 
 impl TrayApp {
     fn send_notification(&self, body: &str) {
-        if self.config_sender.borrow().notifications_enabled {
+        if self.notify {
             let _ = notify_rust::Notification::new()
                 .summary("Think Rider")
                 .body(body)
@@ -129,9 +126,12 @@ impl ApplicationHandler<UserEvent> for TrayApp {
                 if let Ok(action) = MenuAction::try_from(id) {
                     match action {
                         MenuAction::ToggleNotify => {
-                            let mut current = self.config_sender.borrow().clone();
-                            current.notifications_enabled = !current.notifications_enabled;
-                            let _ = self.config_sender.send(current);
+                            self.notify = !self.notify;
+                            self.items.notify.set_text(if self.notify {
+                                "Notification [ON]"
+                            } else {
+                                "Notification [OFF]"
+                            });
                         }
                         MenuAction::Search => {
                             let _ = self.command_sender.send(BleCommand::SearchDevice);
@@ -145,13 +145,6 @@ impl ApplicationHandler<UserEvent> for TrayApp {
                         _ => {}
                     }
                 }
-            }
-            UserEvent::ConfigChanged(config) => {
-                self.items.notify.set_text(if config.notifications_enabled {
-                    "Notification [ON]"
-                } else {
-                    "Notification [OFF]"
-                });
             }
         }
     }
@@ -212,29 +205,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = proxy_menu.send_event(UserEvent::Menu(event));
     }));
 
-    let app_state = BleConfig {
-        notifications_enabled: true,
-        ..Default::default()
-    };
-
     // 1. Initialize BLE System synchronously (creates channels only)
-    let system = BleSystem::new(app_state);
+    let system = BleSystem::default();
     let BleSystemHandle {
         command_sender,
-        config_sender,
-        config_receiver,
         event_sender,
     } = system.handle();
 
     // 2. Setup Runtime and start BLE in background
-    let rt = tokio::runtime::Runtime::new()?;
+    let tokio = tokio::runtime::Runtime::new()?;
 
-    rt.spawn(async move {
+    let handler = thinkrider_vs200_rs::KeyboardInteraction::new()?;
+    tokio.spawn(async move {
         if let Err(e) = system
-            .bootstrap(
-                thinkrider_vs200_rs::ThinkRiderVS200,
-                InteractionType::Keyboard,
-            )
+            .bootstrap(thinkrider_vs200_rs::ThinkRiderVS200, handler)
             .await
         {
             tracing::error!(%e, "Failed to bootstrap BLE system");
@@ -243,7 +227,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Setup Bridge Tasks immediately
     let proxy_clone = proxy.clone();
-    rt.spawn(async move {
+    tokio.spawn(async move {
         let mut event_receiver = event_sender.subscribe();
         loop {
             match event_receiver.recv().await {
@@ -255,15 +239,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
-        }
-    });
-
-    let mut watcher_config_receiver = config_receiver;
-    let proxy_watcher = proxy.clone();
-    rt.spawn(async move {
-        while watcher_config_receiver.changed().await.is_ok() {
-            let new_config = watcher_config_receiver.borrow().clone();
-            let _ = proxy_watcher.send_event(UserEvent::ConfigChanged(new_config));
         }
     });
 
@@ -279,8 +254,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut app = TrayApp {
         command_sender,
-        config_sender,
         items: tray_menu.items,
+        notify: true,
     };
 
     // Trigger auto-search on startup to initiate connection process immediately
