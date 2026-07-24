@@ -16,9 +16,6 @@ pub enum BleError {
     #[error("BLE Adapter Error: {0}")]
     AdapterError(#[from] btleplug::Error),
 
-    #[error("Interaction Error: {0}")]
-    InteractionError(String),
-
     #[error("Target BLE device not found")]
     DeviceNotFound,
 
@@ -30,6 +27,15 @@ pub enum BleError {
 
     #[error("Generic error: {0}")]
     Generic(#[from] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl BleError {
+    pub fn generic<E>(err: E) -> Self
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        BleError::Generic(err.into())
+    }
 }
 
 type BleResult<T> = Result<T, BleError>;
@@ -250,12 +256,7 @@ impl KeyboardInteraction {
     ///
     /// Returns a `BleError` if the keyboard backend fails to initialize.
     pub fn new() -> BleResult<Self> {
-        let enigo = Enigo::new(&Settings::default()).map_err(|error| {
-            BleError::InteractionError(format!(
-                "Failed to initialize keyboard emulator (Enigo): {}",
-                error
-            ))
-        })?;
+        let enigo = Enigo::new(&Settings::default()).map_err(BleError::generic)?;
         Ok(Self {
             enigo,
             up_key: Key::K,
@@ -266,10 +267,10 @@ impl KeyboardInteraction {
     fn simulate_keypress(&mut self, key: Key) -> BleResult<()> {
         self.enigo
             .key(key, Direction::Press)
-            .map_err(|error| BleError::InteractionError(error.to_string()))?;
+            .map_err(BleError::generic)?;
         self.enigo
             .key(key, Direction::Release)
-            .map_err(|error| BleError::InteractionError(error.to_string()))?;
+            .map_err(BleError::generic)?;
         Ok(())
     }
 }
