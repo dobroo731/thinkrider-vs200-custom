@@ -651,7 +651,7 @@ impl BleWorker {
         }
     }
 
-    async fn start_connection_session(
+    fn start_connection_session(
         context: Arc<BleContext>,
         device: BleDevice,
         task: ActiveTask,
