@@ -340,8 +340,7 @@ pub struct BleSystemHandle {
 /// A helper to encapsulate the standard setup of BLE components.
 pub struct BleSystem {
     handle: BleSystemHandle,
-    command_receiver: Option<mpsc::UnboundedReceiver<BleCommand>>,
-    shutdown_token: CancellationToken,
+    command_receiver: mpsc::UnboundedReceiver<BleCommand>,
 }
 
 impl BleSystem {
@@ -349,27 +348,16 @@ impl BleSystem {
         self.handle.clone()
     }
 
-    /// Explicitly shut down the BLE system and all its background tasks.
-    pub fn shutdown(&self) {
-        self.shutdown_token.cancel();
-    }
-
     /// Boots the BLE worker and interaction manager as background tasks.
     pub async fn bootstrap<P: BleDeviceProfile + 'static>(
-        mut self,
+        self,
         profile: P,
         handler: impl InteractionHandler + 'static,
     ) -> BleResult<ActiveTask> {
         let handle = self.handle.clone();
-        let task = ActiveTask::from(self.shutdown_token.clone());
-
-        // Take the receiver out of Option to move it into the worker task
-        let command_receiver = self
-            .command_receiver
-            .take()
-            .ok_or_else(|| BleError::InteractionError("BLE System already bootstrapped".into()))?;
-
-        let worker = BleWorker::new(profile, handle.event_sender.clone(), command_receiver).await?;
+        let task = ActiveTask::from(CancellationToken::new());
+        let worker =
+            BleWorker::new(profile, handle.event_sender.clone(), self.command_receiver).await?;
 
         let worker_token = task.cancelation_token.clone();
         task.tracker.spawn(async move {
@@ -378,7 +366,6 @@ impl BleSystem {
             }
         });
 
-        // 2. Spawn Interaction Manager
         let interaction_manager = InteractionManager::new(handle.event_sender.subscribe(), handler);
 
         let manager_token = task.cancelation_token.clone();
@@ -400,16 +387,8 @@ impl Default for BleSystem {
                 event_sender,
                 command_sender,
             },
-            command_receiver: Some(command_receiver),
-            shutdown_token: CancellationToken::new(),
+            command_receiver,
         }
-    }
-}
-
-impl Drop for BleSystem {
-    fn drop(&mut self) {
-        tracing::info!("BleSystem dropped: triggering automatic shutdown");
-        self.shutdown();
     }
 }
 
@@ -483,7 +462,7 @@ impl BleContext {
     async fn handle_peripheral(
         self: Arc<Self>,
         mut device: BleDevice,
-        task: ActiveTask,
+        task: &ActiveTask,
     ) -> BleResult<()> {
         self.setup_device(&mut device).await?;
 
@@ -530,7 +509,7 @@ enum InternalEvent {
     StatusUpdate(State),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ActiveTask {
     tracker: TaskTracker,
     cancelation_token: CancellationToken,
@@ -538,6 +517,7 @@ pub struct ActiveTask {
 
 impl Drop for ActiveTask {
     fn drop(&mut self) {
+        tracing::trace!("Dropping active task {:p}", &self);
         self.cancelation_token.cancel();
         self.tracker.close();
     }
@@ -670,7 +650,7 @@ impl BleWorker {
 
                 let attempt = context
                     .clone()
-                    .handle_peripheral(device.clone(), task.clone())
+                    .handle_peripheral(device.clone(), &task)
                     .with_cancellation_token(&task.cancelation_token)
                     .await;
 
@@ -723,11 +703,12 @@ impl BleWorker {
                                 self.worker_event_sender.clone(),
                                 task.cancelation_token.clone(),
                             ));
+                        tracing::warn!("new {:p}", &task);
                             active_task = Some(task);
                         }
                         BleCommand::StopSearch => {
                             let _ = self.context.event_sender.send(BleEvent::StatusUpdate(State::Disconnected));
-                            active_task.take(); // RAII handles the abort/cancel via ActiveTask::drop
+                            active_task.take();
                         }
                     }
                 }
