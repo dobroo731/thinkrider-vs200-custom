@@ -213,13 +213,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tokio = tokio::runtime::Runtime::new()?;
 
     let handler = thinkrider_vs200_rs::KeyboardInteraction::new()?;
-    tokio.spawn(async move {
-        if let Err(e) = system
+    let background_task = tokio.spawn(async move {
+        system
             .bootstrap(thinkrider_vs200_rs::ThinkRiderVS200, handler)
             .await
-        {
-            tracing::error!(%e, "Failed to bootstrap BLE system");
-        }
+            .inspect_err(|e| tracing::error!(%e, "Failed to bootstrap BLE system"))
     });
 
     // 3. Setup Bridge Tasks immediately
@@ -260,6 +258,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     event_loop.run_app(&mut app)?;
     drop(tray_icon);
+    background_task.abort();
 
     Ok(())
 }

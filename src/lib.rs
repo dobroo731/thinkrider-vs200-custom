@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::future::FutureExt;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 #[derive(thiserror::Error, Debug)]
@@ -358,9 +359,9 @@ impl BleSystem {
         mut self,
         profile: P,
         handler: impl InteractionHandler + 'static,
-    ) -> BleResult<()> {
+    ) -> BleResult<ActiveTask> {
         let handle = self.handle.clone();
-        let shutdown_token = self.shutdown_token.clone();
+        let task = ActiveTask::from(self.shutdown_token.clone());
 
         // Take the receiver out of Option to move it into the worker task
         let command_receiver = self
@@ -370,8 +371,8 @@ impl BleSystem {
 
         let worker = BleWorker::new(profile, handle.event_sender.clone(), command_receiver).await?;
 
-        let worker_token = shutdown_token.clone();
-        tokio::spawn(async move {
+        let worker_token = task.cancelation_token.clone();
+        task.tracker.spawn(async move {
             if let Err(error) = worker.run(worker_token).await {
                 tracing::error!(%error, "BleWorker critical error");
             }
@@ -380,12 +381,12 @@ impl BleSystem {
         // 2. Spawn Interaction Manager
         let interaction_manager = InteractionManager::new(handle.event_sender.subscribe(), handler);
 
-        let manager_token = shutdown_token;
-        tokio::spawn(async move {
+        let manager_token = task.cancelation_token.clone();
+        task.tracker.spawn(async move {
             interaction_manager.run(manager_token).await;
         });
 
-        Ok(())
+        Ok(task)
     }
 }
 
@@ -482,7 +483,7 @@ impl BleContext {
     async fn handle_peripheral(
         self: Arc<Self>,
         mut device: BleDevice,
-        token: CancellationToken,
+        task: ActiveTask,
     ) -> BleResult<()> {
         self.setup_device(&mut device).await?;
 
@@ -495,8 +496,9 @@ impl BleContext {
 
         let device_for_poll = device.clone();
         let context_for_poll = self.clone();
-        let token_for_poll = token.clone();
-        tokio::spawn(async move {
+        let token_for_poll = task.cancelation_token.clone();
+
+        task.tracker.spawn(async move {
             let mut poll_interval = tokio::time::interval(BATTERY_POLL_INTERVAL);
             while poll_interval
                 .tick()
@@ -518,7 +520,8 @@ impl BleContext {
             }
         });
 
-        self.process_notifications(&mut device, token).await
+        self.process_notifications(&mut device, task.cancelation_token.clone())
+            .await
     }
 }
 
@@ -527,18 +530,24 @@ enum InternalEvent {
     StatusUpdate(State),
 }
 
-enum ActiveTask {
-    Scan(tokio::task::JoinHandle<()>, CancellationToken),
-    Connection(tokio::task::JoinHandle<()>, CancellationToken),
+#[derive(Clone)]
+pub struct ActiveTask {
+    tracker: TaskTracker,
+    cancelation_token: CancellationToken,
 }
 
 impl Drop for ActiveTask {
     fn drop(&mut self) {
-        match self {
-            ActiveTask::Scan(handle, token) | ActiveTask::Connection(handle, token) => {
-                token.cancel();
-                handle.abort();
-            }
+        self.cancelation_token.cancel();
+        self.tracker.close();
+    }
+}
+
+impl From<CancellationToken> for ActiveTask {
+    fn from(value: CancellationToken) -> Self {
+        ActiveTask {
+            tracker: TaskTracker::new(),
+            cancelation_token: value,
         }
     }
 }
@@ -643,15 +652,14 @@ impl BleWorker {
     }
 
     async fn start_connection_session(
-        &self,
+        context: Arc<BleContext>,
         device: BleDevice,
-        token: CancellationToken,
-    ) -> tokio::task::JoinHandle<()> {
+        task: ActiveTask,
+    ) -> impl Future<Output = ()> {
         let address = device.address().to_string();
-        let context = self.context.clone();
         let event_sender = context.event_sender.clone();
 
-        tokio::spawn(async move {
+        async move {
             let mut retry_count = 0;
             let mut backoff = INITIAL_BACKOFF;
 
@@ -662,8 +670,8 @@ impl BleWorker {
 
                 let attempt = context
                     .clone()
-                    .handle_peripheral(device.clone(), token.clone())
-                    .with_cancellation_token(&token)
+                    .handle_peripheral(device.clone(), task.clone())
+                    .with_cancellation_token(&task.cancelation_token)
                     .await;
 
                 match attempt {
@@ -673,7 +681,7 @@ impl BleWorker {
                         retry_count += 1;
 
                         if tokio::time::sleep(backoff)
-                            .with_cancellation_token(&token)
+                            .with_cancellation_token(&task.cancelation_token)
                             .await
                             .is_none()
                         {
@@ -688,10 +696,10 @@ impl BleWorker {
                 }
             }
 
-            if !token.is_cancelled() {
+            if !task.cancelation_token.is_cancelled() {
                 let _ = event_sender.send(BleEvent::StatusUpdate(State::Disconnected));
             }
-        })
+        }
     }
 
     pub async fn run(mut self, shutdown_token: CancellationToken) -> BleResult<()> {
@@ -708,36 +716,38 @@ impl BleWorker {
                         BleCommand::SearchDevice => {
                             let _ = self.context.event_sender.send(BleEvent::StatusUpdate(State::Searching));
                             let token = shutdown_token.child_token();
-                            let handle = tokio::spawn(Self::execute_scan(
+                            let task = ActiveTask::from(token);
+                            task.tracker.spawn(Self::execute_scan(
                                 self.adapter.clone(),
                                 self.context.profile.clone(),
                                 self.worker_event_sender.clone(),
-                                token.clone()
+                                task.cancelation_token.clone(),
                             ));
-                            active_task = Some(ActiveTask::Scan(handle, token));
+                            active_task = Some(task);
                         }
                         BleCommand::StopSearch => {
                             let _ = self.context.event_sender.send(BleEvent::StatusUpdate(State::Disconnected));
-                        active_task.take(); // RAII handles the abort/cancel via ActiveTask::drop
+                            active_task.take(); // RAII handles the abort/cancel via ActiveTask::drop
                         }
                     }
                 }
                 Some(internal_event) = self.worker_event_receiver.recv() => match internal_event {
                     InternalEvent::DeviceFound(device) => {
                         let token = shutdown_token.child_token();
-                        let handle = self.start_connection_session(device, token.clone()).await;
-                        active_task = Some(ActiveTask::Connection(handle, token));
+                        let task = ActiveTask::from(token);
+                        task.tracker.spawn(
+                            Self::start_connection_session(self.context.clone(), device, task.clone())
+                        );
+                        active_task = Some(task);
                     }
                     InternalEvent::StatusUpdate(status) => {
                         let _ = self.context.event_sender.send(BleEvent::StatusUpdate(status));
                     }
-                },
+                }
             }
         }
 
-        // Explicitly clear active task on loop exit to ensure immediate cleanup
-        // rather than waiting for the worker object itself to be dropped.
-        active_task.take(); // RAII handles the abort/cancel via ActiveTask::drop
+        active_task.take();
         Ok(())
     }
 }

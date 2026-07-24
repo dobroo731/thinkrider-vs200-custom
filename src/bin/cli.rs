@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ..
     } = system.handle();
 
-    system
+    let background_task = system
         .bootstrap(
             thinkrider_vs200_rs::ThinkRiderVS200,
             thinkrider_vs200_rs::KeyboardInteraction::new()?,
@@ -58,5 +58,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
+    drop(background_task);
     Ok(())
 }
