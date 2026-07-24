@@ -718,7 +718,7 @@ impl BleWorker {
         }
     }
 
-    /// Executes the main loop of the BLE worker, managing device scanning, connection, 
+    /// Executes the main loop of the BLE worker, managing device scanning, connection,
     /// and command processing until shutdown is signaled.
     ///
     /// # Errors
@@ -745,7 +745,6 @@ impl BleWorker {
                                 self.worker_event_sender.clone(),
                                 task.cancelation_token.clone(),
                             ));
-                        tracing::warn!("new {:p}", &task);
                             active_task = Some(task);
                         }
                         BleCommand::StopSearch => {
