@@ -37,7 +37,7 @@ type BleResult<T> = Result<T, BleError>;
 const SCAN_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_RECONNECTION_ATTEMPTS: u32 = 5;
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
-const BATTERY_POLL_INTERVAL: Duration = Duration::from_secs(300);
+const BATTERY_POLL_INTERVAL: Duration = Duration::from_mins(5);
 const EVENT_CHANNEL_CAPACITY: usize = 16;
 
 #[derive(Clone)]
@@ -69,8 +69,10 @@ pub trait BleDeviceProfile: Send + Sync {
             }
         }
 
-        let notify = notify?;
-        Some(DeviceCharacteristics { notify, battery })
+        Some(DeviceCharacteristics {
+            notify: notify?,
+            battery,
+        })
     }
 
     fn parse_notification(&self, uuid: Uuid, value: &[u8]) -> Option<BleEvent> {
@@ -117,10 +119,16 @@ impl BleDevice {
         }
     }
 
+    #[must_use]
     pub fn address(&self) -> &str {
         &self.address
     }
 
+    /// Listens for notifications from the peripheral and executes a handler for each value received.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `BleError` if there is an issue with the BLE adapter or notification stream.
     pub async fn listen<F>(&self, mut handler: F) -> BleResult<()>
     where
         F: FnMut(ValueNotification) + Send,
@@ -132,6 +140,11 @@ impl BleDevice {
         Ok(())
     }
 
+    /// Connects to the peripheral and subscribes to the notifications defined in the profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `BleError` if connection fails or subscription cannot be established.
     pub async fn connect_and_subscribe(&mut self) -> BleResult<()> {
         tracing::debug!(address = %self.address, "Connecting to peripheral");
         self.peripheral.connect().await?;
@@ -167,6 +180,11 @@ impl BleDevice {
         Ok(())
     }
 
+    /// Reads the current battery level of the peripheral.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `BleError` if the read operation fails or communication is interrupted.
     pub async fn read_battery(&self) -> BleResult<Option<u8>> {
         if let Some(battery_characteristic) = &self.battery {
             let value = self.peripheral.read(battery_characteristic).await?;
@@ -175,12 +193,13 @@ impl BleDevice {
         Ok(None)
     }
 
+    #[must_use]
     pub fn parse_notification(&self, uuid: Uuid, value: &[u8]) -> Option<BleEvent> {
         self.profile.parse_notification(uuid, value)
     }
 }
 
-/// Zero Sized Type for the ThinkRider VS01/200 profile.
+/// Zero Sized Type for the `ThinkRider` VS01/200 profile.
 pub struct ThinkRiderVS200;
 
 #[async_trait]
@@ -225,6 +244,11 @@ pub struct KeyboardInteraction {
 }
 
 impl KeyboardInteraction {
+    /// Creates a new `KeypressHandler`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `BleError` if the keyboard backend fails to initialize.
     pub fn new() -> BleResult<Self> {
         let enigo = Enigo::new(&Settings::default()).map_err(|error| {
             BleError::InteractionError(format!(
@@ -239,7 +263,7 @@ impl KeyboardInteraction {
         })
     }
 
-    async fn simulate_keypress(&mut self, key: Key) -> BleResult<()> {
+    fn simulate_keypress(&mut self, key: Key) -> BleResult<()> {
         self.enigo
             .key(key, Direction::Press)
             .map_err(|error| BleError::InteractionError(error.to_string()))?;
@@ -253,11 +277,11 @@ impl KeyboardInteraction {
 #[async_trait]
 impl InteractionHandler for KeyboardInteraction {
     async fn shift_up(&mut self) -> BleResult<()> {
-        self.simulate_keypress(self.up_key).await
+        self.simulate_keypress(self.up_key)
     }
 
     async fn shift_down(&mut self) -> BleResult<()> {
-        self.simulate_keypress(self.down_key).await
+        self.simulate_keypress(self.down_key)
     }
 }
 
@@ -344,11 +368,17 @@ pub struct BleSystem {
 }
 
 impl BleSystem {
+    #[must_use]
     pub fn handle(&self) -> BleSystemHandle {
         self.handle.clone()
     }
 
     /// Boots the BLE worker and interaction manager as background tasks.
+    /// Bootstraps the BLE worker into an active task that manages the device lifecycle.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `BleError` if the initial adapter setup or scanning process fails.
     pub async fn bootstrap<P: BleDeviceProfile + 'static>(
         self,
         profile: P,
@@ -541,6 +571,11 @@ pub struct BleWorker {
 }
 
 impl BleWorker {
+    /// Creates a new instance of the `BleWorker` orchestrator.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `BleError` if there is an issue initializing the BLE adapter or manager.
     pub async fn new<P: BleDeviceProfile + 'static>(
         profile: P,
         event_sender: broadcast::Sender<BleEvent>,
@@ -655,7 +690,7 @@ impl BleWorker {
                     .await;
 
                 match attempt {
-                    None | Some(Ok(_)) => break, // Normal closure of the session
+                    None | Some(Ok(())) => break, // Normal closure of the session
                     Some(Err(e)) if retry_count < MAX_RECONNECTION_ATTEMPTS => {
                         tracing::warn!(%e, "Connection lost. Retrying...");
                         retry_count += 1;
@@ -682,12 +717,18 @@ impl BleWorker {
         }
     }
 
+    /// Executes the main loop of the BLE worker, managing device scanning, connection, 
+    /// and command processing until shutdown is signaled.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `BleError` if a critical system failure occurs that prevents further execution.
     pub async fn run(mut self, shutdown_token: CancellationToken) -> BleResult<()> {
         let mut active_task = None;
 
         loop {
             tokio::select! {
-                _ = shutdown_token.cancelled() => {
+                () = shutdown_token.cancelled() => {
                     tracing::info!("BleWorker shutting down via global token");
                     break;
                 }

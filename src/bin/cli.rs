@@ -42,16 +42,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 match result {
                     Ok(event) => match event {
                         BleEvent::StatusUpdate(state) => {
-                            println!("Status: {}", state);
+                            println!("Status: {state}");
                         }
                         BleEvent::BatteryLevel(level) => {
-                            println!("Battery level: {}%", level);
+                            println!("Battery level: {level}%");
                             if level <= 20 {
                                 println!("Low battery warning!");
                             }
                         }
                         BleEvent::KeyPress(key) => {
-                            println!("Key Pressed: {}", key);
+                            println!("Key Pressed: {key}");
                         }
                     },
                     Err(broadcast::error::RecvError::Lagged(n)) => {

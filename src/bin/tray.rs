@@ -78,10 +78,10 @@ impl ApplicationHandler<UserEvent> for TrayApp {
                         State::Disconnected => "Status: Disconnected".to_string(),
                         State::Searching => "Status: Searching...".to_string(),
                         State::Connecting { device_address } => {
-                            format!("Status: Connecting to {}...", device_address)
+                            format!("Status: Connecting to {device_address}...")
                         }
                         State::Connected { device_address } => {
-                            format!("Status: Connected ({})", device_address)
+                            format!("Status: Connected ({device_address})")
                         }
                     };
                     self.items.status.set_text(status_text);
@@ -100,7 +100,7 @@ impl ApplicationHandler<UserEvent> for TrayApp {
 
                     if let Some(msg) = match new_state {
                         State::Connected { device_address } => {
-                            Some(format!("Connected to {}", device_address))
+                            Some(format!("Connected to {device_address}"))
                         }
                         State::Disconnected => Some("Disconnected".to_string()),
                         _ => None,
@@ -109,10 +109,10 @@ impl ApplicationHandler<UserEvent> for TrayApp {
                     }
                 }
                 BleEvent::BatteryLevel(level) => {
-                    self.items.battery.set_text(format!("Battery: {}%", level));
+                    self.items.battery.set_text(format!("Battery: {level}%"));
                 }
                 BleEvent::KeyPress(key) => {
-                    self.send_notification(&format!("Key Pressed: {}", key));
+                    self.send_notification(&format!("Key Pressed: {key}"));
                 }
             },
             UserEvent::Tray(_tray_event) => {
