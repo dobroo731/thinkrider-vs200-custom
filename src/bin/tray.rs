@@ -70,7 +70,7 @@ impl ApplicationHandler<UserEvent> for TrayApp {
         // No windows in this app
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::BleUpdate(worker_event) => match worker_event {
                 BleEvent::StatusUpdate(ref new_state) => {
@@ -137,7 +137,7 @@ impl ApplicationHandler<UserEvent> for TrayApp {
                             let _ = self.command_sender.send(BleCommand::StopSearch);
                         }
                         MenuAction::Quit => {
-                            std::process::exit(0);
+                            event_loop.exit();
                         }
                         _ => {}
                     }
@@ -213,12 +213,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tokio = tokio::runtime::Runtime::new()?;
 
     let handler = thinkrider_vs200_rs::KeyboardInteraction::new()?;
-    let background_task = tokio.spawn(async move {
+    let background_task = tokio.block_on(async {
         system
             .bootstrap(thinkrider_vs200_rs::ThinkRiderVS200, handler)
             .await
-            .inspect_err(|e| tracing::error!(%e, "Failed to bootstrap BLE system"))
-    });
+    })?;
 
     // 3. Setup Bridge Tasks immediately
     let proxy_clone = proxy.clone();
@@ -257,8 +256,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = app.command_sender.send(BleCommand::SearchDevice);
 
     event_loop.run_app(&mut app)?;
-    drop(tray_icon);
-    background_task.abort();
 
+    // extend lifecycles till app close to prevent early resource cleanup
+    drop(tray_icon);
+    drop(background_task);
     Ok(())
 }

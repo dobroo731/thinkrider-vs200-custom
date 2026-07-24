@@ -31,33 +31,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     println!("Listening for events... (Press Ctrl+C to stop)");
 
+    let mut event_receiver = event_sender.subscribe();
     loop {
-        let mut event_receiver = event_sender.subscribe();
-        match event_receiver.recv().await {
-            Ok(event) => match event {
-                BleEvent::StatusUpdate(state) => {
-                    println!("Status: {}", state);
-                }
-                BleEvent::BatteryLevel(level) => {
-                    println!("Battery level: {}%", level);
-                    if level <= 20 {
-                        println!("Low battery warning!");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("\nShutdown signal received. Cleaning up...");
+                break;
+            }
+            result = event_receiver.recv() => {
+                match result {
+                    Ok(event) => match event {
+                        BleEvent::StatusUpdate(state) => {
+                            println!("Status: {}", state);
+                        }
+                        BleEvent::BatteryLevel(level) => {
+                            println!("Battery level: {}%", level);
+                            if level <= 20 {
+                                println!("Low battery warning!");
+                            }
+                        }
+                        BleEvent::KeyPress(key) => {
+                            println!("Key Pressed: {}", key);
+                        }
+                    },
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(lagged_messages = n, "Receiver lagged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::error!("Event channel closed. Exiting...");
+                        break;
                     }
                 }
-                BleEvent::KeyPress(key) => {
-                    println!("Key Pressed: {}", key);
-                }
-            },
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!(lagged_messages = n, "Receiver lagged");
-            }
-            Err(broadcast::error::RecvError::Closed) => {
-                tracing::error!("Event channel closed. Exiting...");
-                break;
             }
         }
     }
 
+    // extend lifecycles till app close to prevent early resource cleanup
     drop(background_task);
     Ok(())
 }
