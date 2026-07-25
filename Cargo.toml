@@ -18,3 +18,13 @@ thiserror = "2.0.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
+image = "0.25.10"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+# debug = 1
+
+[build-dependencies]
+winresource = "0.1.31"

@@ -13,6 +13,14 @@ use winit::{
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
 };
 
+fn load_icon(bytes: &[u8]) -> Result<Icon, Box<dyn std::error::Error>> {
+    let img = image::load_from_memory(bytes)?;
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let pixels = rgba.into_raw();
+    Ok(Icon::from_rgba(pixels, width, height)?)
+}
+
 enum UserEvent {
     BleUpdate(BleEvent),
     Tray(TrayIconEvent),
@@ -49,6 +57,9 @@ struct TrayApp {
     command_sender: mpsc::UnboundedSender<BleCommand>,
     items: MenuItems,
     notify: bool,
+    tray_icon: tray_icon::TrayIcon,
+    icon_active: Icon,
+    icon_inactive: Icon,
 }
 
 impl TrayApp {
@@ -135,6 +146,11 @@ impl ApplicationHandler<UserEvent> for TrayApp {
                             } else {
                                 "Notification [OFF]"
                             });
+                            let _ = self.tray_icon.set_icon(Some(if self.notify {
+                                self.icon_active.clone()
+                            } else {
+                                self.icon_inactive.clone()
+                            }));
                         }
                         MenuAction::Search => {
                             let _ = self.command_sender.send(BleCommand::SearchDevice);
@@ -242,20 +258,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let icon_data = vec![255u8; 32 * 32 * 4];
-    let icon = Icon::from_rgba(icon_data, 32, 32)?;
+    let icon_active = load_icon(include_bytes!("../../assets/tray_active.png"))?;
+    let icon_inactive = load_icon(include_bytes!("../../assets/tray_inactive.png"))?;
     let tray_menu = TrayMenu::new()?;
 
     let tray_icon = TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu.menu))
         .with_tooltip("Think Rider")
-        .with_icon(icon)
+        .with_icon(icon_active.clone())
         .build()?;
 
     let mut app = TrayApp {
         command_sender,
         items: tray_menu.items,
         notify: true,
+        tray_icon,
+        icon_active,
+        icon_inactive,
     };
 
     // Trigger auto-search on startup to initiate connection process immediately
@@ -264,7 +283,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     event_loop.run_app(&mut app)?;
 
     // extend lifecycles till app close to prevent early resource cleanup
-    drop(tray_icon);
     drop(background_task);
     Ok(())
 }
