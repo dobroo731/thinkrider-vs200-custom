@@ -1,3 +1,9 @@
+// Disables windows terminal spawn on release builds
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
+
 use thinkrider_vs200_rs::{BleCommand, BleEvent, BleSystem, BleSystemHandle, State};
 use tokio::sync::mpsc;
 use tray_icon::menu::{MenuEvent, MenuId, MenuItem};
