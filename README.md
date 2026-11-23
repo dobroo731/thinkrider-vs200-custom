@@ -1,8 +1,6 @@
 # ThinkRider VS200 Virtual Shifter (Custom Windows Tray Fork)
 
-<img src="assets/icon.png" alt="ThinkRider VS200 Logo" width="100"/>
-<img src="assets/tray_active.png" alt="ThinkRider VS200 Logo" width="100"/>
-<img src="assets/tray_inactive.png" alt="ThinkRider VS200 Logo" width="100"/>
+<img src="assets/icon.png" alt="ThinkRider VS200 Logo" width="100"/> <img src="assets/tray_active.png" alt="ThinkRider VS200 Logo" width="100"/> <img src="assets/tray_inactive.png" alt="ThinkRider VS200 Logo" width="100"/>
 
 > Pre-built Windows binary (`tray.exe`) with custom status icons, embedded `.ico` icon, and silent startup is available on the **[Releases](../../releases)** page.
 
