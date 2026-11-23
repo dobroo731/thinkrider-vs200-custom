@@ -115,6 +115,14 @@ impl ApplicationHandler<UserEvent> for TrayApp {
                         self.items.battery.set_text("Battery: --%");
                     }
 
+                    // Меняем иконку в трее в зависимости от подключения пульта
+                    let is_connected = matches!(new_state, State::Connected { .. });
+                    let _ = self.tray_icon.set_icon(Some(if is_connected {
+                        self.icon_active.clone()
+                    } else {
+                        self.icon_inactive.clone()
+                    }));
+
                     if let Some(msg) = match new_state {
                         State::Connected { device_address } => {
                             Some(format!("Connected to {device_address}"))
@@ -146,11 +154,6 @@ impl ApplicationHandler<UserEvent> for TrayApp {
                             } else {
                                 "Notification [OFF]"
                             });
-                            let _ = self.tray_icon.set_icon(Some(if self.notify {
-                                self.icon_active.clone()
-                            } else {
-                                self.icon_inactive.clone()
-                            }));
                         }
                         MenuAction::Search => {
                             let _ = self.command_sender.send(BleCommand::SearchDevice);
@@ -173,7 +176,7 @@ impl TrayMenu {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let menu = tray_icon::menu::Menu::new();
 
-        let notify = MenuItem::with_id(MenuAction::ToggleNotify, "Notification [ON]", true, None);
+        let notify = MenuItem::with_id(MenuAction::ToggleNotify, "Notification [OFF]", true, None);
         let search = MenuItem::with_id(MenuAction::Search, "Search Device", true, None);
         let stop_search = MenuItem::with_id(MenuAction::StopSearch, "Stop Searching", false, None);
         let status = MenuItem::with_id(MenuAction::Status, "Status: Disconnected", false, None);
@@ -265,13 +268,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tray_icon = TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu.menu))
         .with_tooltip("Think Rider")
-        .with_icon(icon_active.clone())
+        .with_icon(icon_inactive.clone())
         .build()?;
 
     let mut app = TrayApp {
         command_sender,
         items: tray_menu.items,
-        notify: true,
+        notify: false,
         tray_icon,
         icon_active,
         icon_inactive,
@@ -281,8 +284,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = app.command_sender.send(BleCommand::SearchDevice);
 
     event_loop.run_app(&mut app)?;
-
-    // extend lifecycles till app close to prevent early resource cleanup
-    drop(background_task);
-    Ok(())
+	// extend lifecycles till app close to prevent early resource cleanup
+	drop(background_task);
+	Ok(())
 }
