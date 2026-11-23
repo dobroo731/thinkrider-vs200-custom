@@ -1,3 +1,20 @@
+# ThinkRider VS200 Virtual Shifter (Custom Windows Tray Fork)
+
+<img src="assets/icon.png" alt="ThinkRider VS200 Logo" width="100"/>
+
+> Pre-built Windows binary (`tray.exe`) with custom status icons, embedded `.ico` icon, and silent startup is available on the **[Releases](../../releases)** page.
+
+## Fork Improvements & Features
+* **Visual Status Tray Icons:** Clear connection feedback in the Windows system tray — a **green `+`** icon when the ThinkRider VS200 remote is connected and active, and a **red `-`** icon when disconnected or searching.
+* **Custom Embedded Executable Icon:** Custom `.ico` icon built directly into `tray.exe` for Windows Explorer, desktop shortcuts, and the taskbar.
+* **Silent Startup (Notifications Disabled by Default):** Pop-up Windows toast notifications are turned off by default so they do not interrupt fullscreen rides (can still be enabled anytime via the tray right-click menu).
+* **Automated Cloud Builds:** Includes a GitHub Actions workflow (`.github/workflows/build.yml`) that automatically compiles `tray.exe` on every commit and attaches binaries to Releases.
+
+### Credits
+* Controller artwork and icon base adapted from the **[OpenBikeControl / BikeControl](https://github.com)** project.
+
+---
+
 # Think Rider BLE Utility
 ![Windows](https://img.shields.io/badge/target-windows?logoColor=white&label=windows&color=green)
 ![Linux](https://img.shields.io/badge/untested-linux?logoColor=white&label=linux&color=lightgray)
