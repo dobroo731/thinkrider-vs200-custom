@@ -11,7 +11,7 @@
 * **Automated Cloud Builds:** Includes a GitHub Actions workflow (`.github/workflows/build.yml`) that automatically compiles `tray.exe` on every commit and attaches binaries to Releases.
 
 ### Credits
-* Controller artwork and icon base adapted from the **[OpenBikeControl / BikeControl]([https://github.com](https://github.com/OpenBikeControl/bikecontrol))** project.
+* Controller artwork and icon base adapted from the **[BikeControl](https://github.com/OpenBikeControl/bikecontrol)** project.
 
 ---
 
